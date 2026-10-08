@@ -24,7 +24,7 @@
     "ai_api_key": "sk-b0c1e86f3a0d496c9a2c4c6a19713a1f",
     "ai_model": "deepseek-v4-flash",
     "ai_chat_enabled": true,
-    "ai_chat_trigger": "",
+    "ai_chat_trigger": "AIAI",
     "ai_chat_cooldown": 5,
     "ai_context_lines": 10,
     "ai_moderation_enabled": true,

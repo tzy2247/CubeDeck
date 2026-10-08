@@ -39,6 +39,7 @@ from core.clean_zones import (
 from ui.pages.zones import ZonesPage
 from ui.pages.ai_page import AIPage
 from core.server_context import ServerContextProvider
+from core.ai_history import AIHistory
 
 
 NAV_ITEMS = [
@@ -113,7 +114,7 @@ class MinecraftManagerGUI(ctk.CTk):
         # ---------- AI 助手 ----------
         self._last_ai_call_time = 0.0
         self._last_ai_call_per_player = {}
-        self.ai_chat_history = []
+        self.ai_history = AIHistory()
         # ---------- AI 上下文采集 ----------
         self.server_context = ServerContextProvider(self)
 
@@ -906,7 +907,7 @@ class MinecraftManagerGUI(ctk.CTk):
 
         # ---------- 对话历史 ----------
         ctx_n = int(self.config_data.get("ai_context_lines", 10))
-        for entry in self.ai_chat_history[-ctx_n:]:
+        for entry in self.ai_history.recent(ctx_n):
             messages.append({
                 "role": "user",
                 "content": f"<{entry['player']}> {entry['message']}"
@@ -916,7 +917,6 @@ class MinecraftManagerGUI(ctk.CTk):
                     "role": "assistant",
                     "content": entry["reply"]
                 })
-
         # ---------- 当前消息 ----------
         prompt_note = []
         if should_reply:
@@ -979,9 +979,7 @@ class MinecraftManagerGUI(ctk.CTk):
             "action": action,
             "reason": reason,
         }
-        self.ai_chat_history.append(entry)
-        if len(self.ai_chat_history) > 200:
-            self.ai_chat_history = self.ai_chat_history[-200:]
+        self.ai_history.append(entry)
 
         try:
             self.pages[AI_PAGE_INDEX].append_chat(

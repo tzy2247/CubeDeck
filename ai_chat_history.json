@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "time": 1791466504.9185903,
+      "player": "TZY2247",
+      "message": "AIAI你好",
+      "reply": "你好喵～欢迎回来！今天已经是第272天啦，要一起去冒险吗喵？",
+      "action": "none",
+      "reason": ""
+    },
+    {
+      "time": 1791466526.5932107,
+      "player": "TZY2247",
+      "message": "AIAI你是谁",
+      "reply": "我是服务器的AI猫娘助手喵～有问题尽管问我！",
+      "action": "none",
+      "reason": ""
+    },
+    {
+      "time": 1791466611.9330342,
+      "player": "TZY2247",
+      "message": "AIAI,作为测试，你可以重复一下我们的上一轮对话中我的问题吗",
+      "reply": "你上一条问的是「AIAI你是谁」喵～",
+      "action": "none",
+      "reason": ""
+    }
+  ]
+}

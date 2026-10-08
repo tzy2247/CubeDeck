@@ -318,18 +318,116 @@ class AIPage:
             tw.tag_config("ai", foreground="#4ade80")
             tw.tag_config("mod", foreground="#fbbf24")
             tw.tag_config("err", foreground="#f87171")
+            tw.tag_config("time", foreground="#5d6577")
         except Exception:
             pass
 
         btns = ctk.CTkFrame(parent, fg_color="transparent")
         btns.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
-        ctk.CTkButton(btns, text="🗑  清空记录", width=120, height=32,
+        ctk.CTkButton(btns, text="🔄  加载最近 200 条", width=160, height=32,
                       corner_radius=8, font=f["body"],
                       fg_color="transparent", hover_color=C["card_hover"],
                       border_width=1, border_color=C["border"],
                       text_color=C["text_dim"],
-                      command=self._clear_log).pack(side="left")
+                      command=self._reload_history
+                      ).pack(side="left")
+
+        ctk.CTkButton(btns, text="📤  导出 JSON", width=130, height=32,
+                      corner_radius=8, font=f["body"],
+                      fg_color="transparent", hover_color=C["card_hover"],
+                      border_width=1, border_color=C["border"],
+                      text_color=C["text_dim"],
+                      command=self._export_history
+                      ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkButton(btns, text="🗑  清空记录", width=120, height=32,
+                      corner_radius=8, font=f["body"],
+                      fg_color="transparent", hover_color="#3b1f24",
+                      border_width=1, border_color=C["border"],
+                      text_color=C["text_dim"],
+                      command=self._clear_log
+                      ).pack(side="right")
+
+        # 首次加载时从磁盘恢复
+        self.after_idle(self._reload_history)
+
+    def after_idle(self, fn):
+        """在 UI 空闲时执行（兼容没有 after_idle 的场景）。"""
+        try:
+            self.app.after(50, fn)
+        except Exception:
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _reload_history(self):
+        """从持久化历史加载最近 200 条并显示。"""
+        try:
+            entries = self.app.ai_history.recent(200)
+        except Exception:
+            entries = []
+
+        self.chat_box.delete("1.0", "end")
+
+        if not entries:
+            self.chat_box.insert("end", "（暂无历史记录）\n", "time")
+            return
+
+        for entry in entries:
+            try:
+                ts = time.strftime(
+                    "%m-%d %H:%M:%S",
+                    time.localtime(entry.get("time", 0)))
+                player = entry.get("player", "?")
+                message = entry.get("message", "")
+                reply = entry.get("reply", "")
+                action = entry.get("action", "none")
+                reason = entry.get("reason", "")
+
+                self.chat_box.insert("end", f"[{ts}] ", "time")
+                self.chat_box.insert("end",
+                                     f"<{player}> {message}\n", "player")
+                if reply:
+                    self.chat_box.insert("end", f"        🤖 {reply}\n", "ai")
+                if action and action != "none":
+                    self.chat_box.insert(
+                        "end",
+                        f"        ⚠ 审核：{action}  ({reason})\n", "mod")
+            except Exception:
+                continue
+
+        self.chat_box.see("end")
+
+    def _export_history(self):
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")],
+            initialfile="ai_chat_history_export.json",
+            title="导出对话记录",
+        )
+        if not path:
+            return
+        if self.app.ai_history.export(path):
+            self.app.log_to_console(f"对话记录已导出：{path}", "ok")
+        else:
+            self.app.log_to_console("导出失败", "error")
+
+    def _clear_log(self):
+        if not messagebox.askyesno(
+                "清空对话记录",
+                "这会同时清空内存和磁盘上的历史记录，且无法恢复。\n\n继续吗？"):
+            return
+        try:
+            self.app.ai_history.clear()
+            self.chat_box.delete("1.0", "end")
+            self.chat_box.insert("end", "（暂无历史记录）\n", "time")
+            self.app.log_to_console("对话记录已清空", "ok")
+            self._refresh_status()
+        except Exception as e:
+            self.app.log_to_console(f"清空失败：{e}", "error")
 
     # ========================================================
     #  生命周期
@@ -340,7 +438,7 @@ class AIPage:
     def _refresh_status(self):
         enabled = self.app.config_data.get("ai_enabled")
         last = getattr(self.app, "_last_ai_call_time", 0)
-        count = len(getattr(self.app, "ai_chat_history", []))
+        count = len(getattr(self.app, "ai_history", []))
         if enabled:
             text = (f"🟢 已启用   ·   最近调用：{self._fmt_time(last)}"
                     f"   ·   对话数：{count}")

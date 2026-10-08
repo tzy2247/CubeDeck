@@ -38,6 +38,7 @@ from core.clean_zones import (
 )
 from ui.pages.zones import ZonesPage
 from ui.pages.ai_page import AIPage
+from core.server_context import ServerContextProvider
 
 
 NAV_ITEMS = [
@@ -113,6 +114,8 @@ class MinecraftManagerGUI(ctk.CTk):
         self._last_ai_call_time = 0.0
         self._last_ai_call_per_player = {}
         self.ai_chat_history = []
+        # ---------- AI 上下文采集 ----------
+        self.server_context = ServerContextProvider(self)
 
         # ---------- 布局 ----------
         self.grid_columnconfigure(0, weight=0, minsize=230)
@@ -599,6 +602,8 @@ class MinecraftManagerGUI(ctk.CTk):
             except Exception:
                 pass
             self._log_watcher = None
+        if self.server_context:
+            self.server_context.invalidate()
 
         self.log_to_console("服务器已停止", "ok")
         self.ui(self._on_stopped_ui)
@@ -665,6 +670,8 @@ class MinecraftManagerGUI(ctk.CTk):
         for page in self.pages:
             if hasattr(page, "on_rcon_connected"):
                 page.on_rcon_connected()
+        if self.server_context:
+            self.server_context.invalidate()
 
     def manual_reconnect_rcon(self):
         if not self.is_running:
@@ -865,9 +872,39 @@ class MinecraftManagerGUI(ctk.CTk):
             timeout=30,
         )
 
-        system_prompt = self.config_data.get("ai_system_prompt", "")
-        messages = [{"role": "system", "content": system_prompt}]
+        # ---------- 构造上下文 ----------
+        base_prompt = self.config_data.get("ai_system_prompt", "")
 
+        context_blocks = []
+        if self.config_data.get("ai_context_enabled", True):
+            try:
+                self.server_context._cache_ttl = float(
+                    self.config_data.get("ai_context_ttl", 30))
+            except Exception:
+                pass
+
+            summary = self.server_context.get_summary()
+            if summary:
+                context_blocks.append(summary)
+
+            if should_reply:
+                detail = self.server_context.get_player_detail(player)
+                if detail:
+                    context_blocks.append(detail)
+
+        if context_blocks:
+            full_system = (
+                    base_prompt
+                    + "\n\n你可以参考下方实时数据回答玩家，"
+                      "但不要照搬原文，只把相关事实融入回复：\n\n"
+                    + "\n\n".join(context_blocks)
+            )
+        else:
+            full_system = base_prompt
+
+        messages = [{"role": "system", "content": full_system}]
+
+        # ---------- 对话历史 ----------
         ctx_n = int(self.config_data.get("ai_context_lines", 10))
         for entry in self.ai_chat_history[-ctx_n:]:
             messages.append({
@@ -880,6 +917,7 @@ class MinecraftManagerGUI(ctk.CTk):
                     "content": entry["reply"]
                 })
 
+        # ---------- 当前消息 ----------
         prompt_note = []
         if should_reply:
             prompt_note.append("回复这位玩家")
@@ -893,7 +931,7 @@ class MinecraftManagerGUI(ctk.CTk):
         })
 
         reply_text, err = client.chat(messages, temperature=0.7,
-                                       max_tokens=400)
+                                      max_tokens=400)
 
         if err:
             self.log_to_console(f"AI 请求失败：{err}", "error")
@@ -903,7 +941,7 @@ class MinecraftManagerGUI(ctk.CTk):
                 pass
             return
 
-        # ---------- 解析 JSON ----------
+        # ---------- 解析 JSON（保持原样）----------
         reply = ""
         action = "none"
         reason = ""
@@ -933,7 +971,6 @@ class MinecraftManagerGUI(ctk.CTk):
         if action != "none" and should_moderate:
             self._execute_moderation(player, action, reason)
 
-        # ---------- 记录 ----------
         entry = {
             "time": time.time(),
             "player": player,

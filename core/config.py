@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "ai_moderation_cooldown": 3,
     "ai_moderation_broadcast": True,
     "ai_global_cooldown": 1.0,
+    "ai_context_enabled": True,  # 让 AI 看到服务器实时状态
+    "ai_context_ttl": 30,  # 状态缓存秒数
 
     "ai_system_prompt": (
         "你是 Minecraft 服务器的 AI 助手。你需要：\n"

@@ -177,10 +177,27 @@ class AIPage:
             card, "上下文条数",
             self.app.config_data.get("ai_context_lines", 10))
 
+        r2 = ctk.CTkFrame(card, fg_color="transparent")
+        r2.pack(fill="x", padx=16, pady=8)
+        ctk.CTkLabel(r2, text="让 AI 感知服务器状态", font=f["body"],
+                     text_color=C["text"], anchor="w").pack(side="left")
+        self.context_enabled_var = ctk.StringVar(
+            value="true" if self.app.config_data.get(
+                "ai_context_enabled", True) else "false")
+        ctk.CTkSwitch(r2, text="", variable=self.context_enabled_var,
+                      onvalue="true", offvalue="false",
+                      progress_color=C["accent"]).pack(side="right")
+
+        self.context_ttl_entry = self._entry_row(
+            card, "状态缓存（秒）",
+            self.app.config_data.get("ai_context_ttl", 30))
+
         ctk.CTkLabel(
             card,
-            text="💡 触发前缀为 `!` 时，玩家输入 `!你好` → AI 回复。\n"
-                 "   留空则 AI 回复所有玩家聊天（成本较高，慎用）。",
+            text=("💡 触发前缀为 `!` 时，玩家输入 `!你好` → AI 回复。\n"
+                  "   留空则 AI 回复所有玩家聊天（成本较高，慎用）。\n"
+                  "   开启「感知服务器状态」后，AI 能看到版本、在线玩家、\n"
+                  "   时间、TPS，以及当前玩家的坐标/血量/等级。"),
             font=f["small"], text_color=C["text_faint"],
             justify="left",
         ).pack(anchor="w", padx=16, pady=(4, 14))
@@ -359,6 +376,9 @@ class AIPage:
             ctx = int(self.ctx_entry.get().strip() or 10)
             mod_cd = int(self.mod_cd_entry.get().strip() or 3)
             global_cd = float(self.global_cd_entry.get().strip() or 1.0)
+            ctx_ttl = int(self.context_ttl_entry.get().strip() or 30)
+            if ctx_ttl < 1:
+                raise ValueError
             if global_cd < 0:
                 raise ValueError
         except ValueError:
@@ -379,6 +399,8 @@ class AIPage:
         cfg["ai_global_cooldown"] = global_cd
         cfg["ai_system_prompt"] = self.prompt_box.get("1.0", "end").strip()
         cfg["ai_enabled"] = self.enable_var.get() == "true"
+        cfg["ai_context_enabled"] = self.context_enabled_var.get() == "true"
+        cfg["ai_context_ttl"] = ctx_ttl
 
         if save_config(cfg):
             self.app.log_to_console("AI 配置已保存", "ok")

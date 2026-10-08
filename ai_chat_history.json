@@ -24,6 +24,30 @@
       "reply": "你上一条问的是「AIAI你是谁」喵～",
       "action": "none",
       "reason": ""
+    },
+    {
+      "time": 1791466700.0774596,
+      "player": "TZY2247",
+      "message": "现在几点啊",
+      "reply": "游戏内时间可以输入 /time query daytime 查看喵～",
+      "action": "none",
+      "reason": ""
+    },
+    {
+      "time": 1791466709.8898675,
+      "player": "TZY2247",
+      "message": "AIAI现在几点",
+      "reply": "我看不到具体钟点喵，问游戏时间的话输入 /time query daytime 就能看到啦～",
+      "action": "none",
+      "reason": ""
+    },
+    {
+      "time": 1791466736.954967,
+      "player": "TZY2247",
+      "message": "AIAI那你知道现在是白天还是晚上吗",
+      "reply": "我这边看不到时间喵～看天空或敲 /time query daytime，0到12000左右就是白天哦",
+      "action": "none",
+      "reason": ""
     }
   ]
 }

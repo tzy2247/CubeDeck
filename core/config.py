@@ -22,6 +22,11 @@ DEFAULT_CONFIG = {
     "global_clean_enabled":          False,
     "auto_drop_clean_interval_min":  30,
 
+    # ---------- 外观 ----------
+    "theme": "深蓝 (默认)",
+    "background_image": "",
+    "background_dim": 120,  # 0-255，图片叠加深色遮罩的强度
+
     # ---------- AI 助手 ----------
     "ai_enabled": False,
     "ai_base_url": "https://api.openai.com/v1",

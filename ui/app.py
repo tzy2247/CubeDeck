@@ -10,7 +10,7 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
-from core.theme import C, make_fonts
+from core.theme import C, make_fonts, load_theme_from_config
 from core.rcon import SimpleRCON
 from core.config import load_config, save_config
 from core.backup import perform_backup, rotate_backups
@@ -19,6 +19,8 @@ from core.permissions import load_permissions, PermissionManager
 from core.log_watcher import LogWatcher
 from core import process_manager as pm
 from core.ai_client import AIClient
+from core.server_context import ServerContextProvider
+from core.ai_history import AIHistory
 
 from ui.pages.dashboard import DashboardPage
 from ui.pages.console_page import ConsolePage
@@ -28,6 +30,8 @@ from ui.pages.roster import RosterPage
 from ui.pages.backup_page import BackupPage
 from ui.pages.properties import PropertiesPage
 from ui.pages.settings import SettingsPage
+from ui.pages.zones import ZonesPage
+from ui.pages.ai_page import AIPage
 
 from core.zones import (
     load_zones, save_zones, build_clean_command,
@@ -36,10 +40,6 @@ from core.zones import (
 from core.clean_zones import (
     load_clean_zones, save_clean_zones, build_clean_zone_command,
 )
-from ui.pages.zones import ZonesPage
-from ui.pages.ai_page import AIPage
-from core.server_context import ServerContextProvider
-from core.ai_history import AIHistory
 
 
 NAV_ITEMS = [
@@ -67,15 +67,19 @@ class MinecraftManagerGUI(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.title("Minecraft Server Pro Manager")
+        self.title("CubeDeck - Best Minecraft Server Manager")
         self.geometry("1180x760")
         self.minsize(980, 660)
+
+        # 主题必须在创建任何 widget 之前加载
+        self.config_data = load_config()
+        load_theme_from_config(self.config_data)
+
         self.configure(fg_color=C["bg"])
 
         self.fonts = make_fonts()
 
         # ---------- 状态 ----------
-        self.config_data = load_config()
         self.server_path = Path(self.config_data["server_path"])
         self.is_running = False
         self.rcon_client = None
@@ -115,11 +119,10 @@ class MinecraftManagerGUI(ctk.CTk):
         self._last_ai_call_time = 0.0
         self._last_ai_call_per_player = {}
         self.ai_history = AIHistory()
-        # ---------- AI 上下文采集 ----------
         self.server_context = ServerContextProvider(self)
 
         # ---------- 布局 ----------
-        self.grid_columnconfigure(0, weight=0, minsize=230)
+        self.grid_columnconfigure(0, weight=0, minsize=240)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
@@ -134,52 +137,71 @@ class MinecraftManagerGUI(ctk.CTk):
         threading.Thread(target=self._detect_running_server,
                          daemon=True).start()
 
-        self.log_to_console("Minecraft 服务器管理器已就绪", "ok")
+        self.log_to_console("CubeDeck 已就绪", "ok")
         self.log_to_console(f"服务器目录：{self.server_path}", "info")
 
     # ========================================================
     #  侧边栏
     # ========================================================
     def _build_sidebar(self):
-        bar = ctk.CTkFrame(self, width=230, corner_radius=0,
+        from core.theme import SPACING, RADIUS
+        bar = ctk.CTkFrame(self, width=240, corner_radius=0,
                            fg_color=C["sidebar"])
         bar.grid(row=0, column=0, sticky="nsew")
         bar.grid_propagate(False)
         bar.grid_columnconfigure(0, weight=1)
         bar.grid_rowconfigure(len(NAV_ITEMS) + 2, weight=1)
 
+        # ---- Logo 区 ----
         logo = ctk.CTkFrame(bar, fg_color="transparent")
-        logo.grid(row=0, column=0, sticky="ew", padx=20, pady=(26, 30))
+        logo.grid(row=0, column=0, sticky="ew",
+                  padx=SPACING["lg"], pady=(24, 28))
 
-        ctk.CTkLabel(logo, text="⛏", width=44, height=44,
-                     font=ctk.CTkFont(size=24),
-                     fg_color=C["accent"], corner_radius=12,
-                     text_color="#ffffff").pack(side="left")
+        ctk.CTkLabel(logo, text="⛏", width=42, height=42,
+                     font=ctk.CTkFont(size=22),
+                     fg_color=C["accent"], corner_radius=RADIUS["button"],
+                     text_color=C["accent_text"]).pack(side="left")
 
         tb = ctk.CTkFrame(logo, fg_color="transparent")
         tb.pack(side="left", padx=(12, 0))
-        ctk.CTkLabel(tb, text="MC Manager", font=self.fonts["h1"],
+        ctk.CTkLabel(tb, text="CubeDeck", font=self.fonts["h1"],
                      text_color=C["text"]).pack(anchor="w")
-        ctk.CTkLabel(tb, text="服务器控制面板", font=self.fonts["small"],
+        ctk.CTkLabel(tb, text="Minecraft 服务器控制台",
+                     font=self.fonts["small"],
                      text_color=C["text_faint"]).pack(anchor="w")
 
+        # ---- 导航按钮 ----
         self.nav_buttons = []
+        self.nav_indicators = []
         for i, (icon, label) in enumerate(NAV_ITEMS):
+            row = ctk.CTkFrame(bar, fg_color="transparent", height=40)
+            row.grid(row=1 + i, column=0, sticky="ew",
+                     padx=SPACING["md"], pady=2)
+            row.grid_columnconfigure(1, weight=1)
+            row.grid_propagate(False)
+
+            indicator = ctk.CTkFrame(row, width=3, height=20,
+                                     fg_color="transparent",
+                                     corner_radius=2)
+            indicator.grid(row=0, column=0, padx=(4, 8), pady=10)
+            self.nav_indicators.append(indicator)
+
             btn = ctk.CTkButton(
-                bar, text=f"  {icon}   {label}", anchor="w",
-                height=42, corner_radius=10,
+                row, text=f"{icon}   {label}", anchor="w",
+                height=40, corner_radius=RADIUS["button"],
                 fg_color="transparent", hover_color=C["card_hover"],
                 text_color=C["text_dim"], font=self.fonts["body"],
                 command=lambda idx=i: self._switch_tab(idx),
             )
-            btn.grid(row=1 + i, column=0, sticky="ew", padx=14, pady=2)
+            btn.grid(row=0, column=1, sticky="ew", padx=(0, 4))
             self.nav_buttons.append(btn)
 
+        # ---- 底部 RCON 状态 ----
         footer = ctk.CTkFrame(bar, fg_color="transparent")
         footer.grid(row=len(NAV_ITEMS) + 3, column=0, sticky="ew",
-                    padx=20, pady=20)
+                    padx=SPACING["lg"], pady=SPACING["xl"])
 
-        self.rcon_dot = ctk.CTkLabel(footer, text="●",
+        self.rcon_dot = ctk.CTkLabel(footer, text="⚪",
                                      font=ctk.CTkFont(size=12),
                                      text_color=C["text_faint"])
         self.rcon_dot.pack(side="left")
@@ -192,13 +214,15 @@ class MinecraftManagerGUI(ctk.CTk):
     #  主区域
     # ========================================================
     def _build_main(self):
+        from core.theme import SPACING, RADIUS
         main = ctk.CTkFrame(self, corner_radius=0, fg_color=C["bg"])
         main.grid(row=0, column=1, sticky="nsew")
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(1, weight=1)
 
         header = ctk.CTkFrame(main, fg_color="transparent", height=56)
-        header.grid(row=0, column=0, sticky="ew", padx=26, pady=(22, 0))
+        header.grid(row=0, column=0, sticky="ew",
+                    padx=SPACING["xl"], pady=(SPACING["xl"], 0))
         header.grid_columnconfigure(0, weight=1)
 
         self.page_title = ctk.CTkLabel(header, text="仪表盘",
@@ -207,15 +231,16 @@ class MinecraftManagerGUI(ctk.CTk):
         self.page_title.grid(row=0, column=0, sticky="w")
 
         self.header_status = ctk.CTkLabel(
-            header, text="●  离线", font=self.fonts["body"],
+            header, text="⚪  离线", font=self.fonts["body"],
             text_color=C["text_dim"], fg_color=C["card"],
-            corner_radius=14, padx=14, pady=6,
+            corner_radius=RADIUS["card"], padx=14, pady=6,
         )
         self.header_status.grid(row=0, column=1, sticky="e")
 
         self.content = ctk.CTkFrame(main, fg_color="transparent")
         self.content.grid(row=1, column=0, sticky="nsew",
-                          padx=26, pady=(18, 24))
+                          padx=SPACING["xl"],
+                          pady=(SPACING["lg"], SPACING["xl"]))
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
 
@@ -239,10 +264,19 @@ class MinecraftManagerGUI(ctk.CTk):
             return
 
         for i, btn in enumerate(self.nav_buttons):
-            btn.configure(
-                fg_color=C["accent"] if i == index else "transparent",
-                text_color="#ffffff" if i == index else C["text_dim"],
-            )
+            if i == index:
+                btn.configure(fg_color=C["card"], text_color=C["text"])
+                try:
+                    self.nav_indicators[i].configure(fg_color=C["accent"])
+                except Exception:
+                    pass
+            else:
+                btn.configure(fg_color="transparent",
+                              text_color=C["text_dim"])
+                try:
+                    self.nav_indicators[i].configure(fg_color="transparent")
+                except Exception:
+                    pass
 
         self.page_frames[self.current_index].grid_forget()
         self.page_frames[index].grid(row=0, column=0, sticky="nsew")
@@ -503,6 +537,48 @@ class MinecraftManagerGUI(ctk.CTk):
         time.sleep(8)
         self._connect_rcon()
 
+    # ========================================================
+    #  重启软件
+    # ========================================================
+    def restart_app(self):
+        """重新启动管理器程序。服务端进程不受影响，下次启动自动接管。"""
+        import subprocess
+
+        # 停止日志监控
+        if self._log_watcher:
+            try:
+                self._log_watcher.stop()
+            except Exception:
+                pass
+            self._log_watcher = None
+
+        # 断开 RCON（服务端不受影响）
+        if self.rcon_client:
+            try:
+                self.rcon_client.disconnect()
+            except Exception:
+                pass
+            self.rcon_client = None
+
+        # 保留 server_state.json，让新进程能接管正在运行的服务端
+
+        # 构造启动命令
+        if getattr(sys, "frozen", False):
+            # PyInstaller 打包后
+            args = [sys.executable] + sys.argv[1:]
+        else:
+            # 开发环境（python main.py）
+            args = [sys.executable] + sys.argv
+
+        try:
+            subprocess.Popen(args, close_fds=True)
+        except Exception as e:
+            messagebox.showerror("重启失败", f"无法启动新进程：\n{e}")
+            return
+
+        # 立即退出当前进程（跳过清理，避免和 Tk 事件循环纠缠）
+        os._exit(0)
+
     def _reset_toggle_button(self):
         self.pages[0].set_toggle_button("normal", "启动服务器", C["green"])
 
@@ -524,7 +600,7 @@ class MinecraftManagerGUI(ctk.CTk):
         except Exception:
             pass
         try:
-            self.rcon_dot.configure(text_color=C["text_faint"])
+            self.rcon_dot.configure(text="⚪")
             self.rcon_label.configure(text="RCON 未连接",
                                       text_color=C["text_faint"])
         except Exception:
@@ -666,7 +742,7 @@ class MinecraftManagerGUI(ctk.CTk):
 
         threading.Thread(target=_detect, daemon=True).start()
 
-        self.rcon_dot.configure(text_color=C["green"])
+        self.rcon_dot.configure(text="🟢")
         self.rcon_label.configure(text="RCON 已连接", text_color=C["green"])
         for page in self.pages:
             if hasattr(page, "on_rcon_connected"):
@@ -802,13 +878,11 @@ class MinecraftManagerGUI(ctk.CTk):
     #  AI 助手
     # ========================================================
     def _on_player_chat(self, player, message):
-        """LogWatcher 回调：玩家聊天。"""
         if not self.config_data.get("ai_enabled"):
             return
         if not self.config_data.get("ai_api_key"):
             return
 
-        # ---------- 判断走哪些流程 ----------
         chat_on = self.config_data.get("ai_chat_enabled", True)
         mod_on = self.config_data.get("ai_moderation_enabled", False)
 
@@ -828,7 +902,6 @@ class MinecraftManagerGUI(ctk.CTk):
         if not should_reply and not should_moderate:
             return
 
-        # ---------- 计算本次调用需要的最低冷却 ----------
         cooldowns = []
         if should_reply:
             cooldowns.append(int(self.config_data.get(
@@ -839,7 +912,6 @@ class MinecraftManagerGUI(ctk.CTk):
 
         required_gap = max(cooldowns) if cooldowns else 5
 
-        # ---------- 冷却检查 ----------
         now = time.time()
 
         global_gap = float(self.config_data.get("ai_global_cooldown", 1.0))
@@ -873,7 +945,6 @@ class MinecraftManagerGUI(ctk.CTk):
             timeout=30,
         )
 
-        # ---------- 构造上下文 ----------
         base_prompt = self.config_data.get("ai_system_prompt", "")
 
         context_blocks = []
@@ -905,7 +976,6 @@ class MinecraftManagerGUI(ctk.CTk):
 
         messages = [{"role": "system", "content": full_system}]
 
-        # ---------- 对话历史 ----------
         ctx_n = int(self.config_data.get("ai_context_lines", 10))
         for entry in self.ai_history.recent(ctx_n):
             messages.append({
@@ -917,7 +987,7 @@ class MinecraftManagerGUI(ctk.CTk):
                     "role": "assistant",
                     "content": entry["reply"]
                 })
-        # ---------- 当前消息 ----------
+
         prompt_note = []
         if should_reply:
             prompt_note.append("回复这位玩家")
@@ -941,7 +1011,6 @@ class MinecraftManagerGUI(ctk.CTk):
                 pass
             return
 
-        # ---------- 解析 JSON（保持原样）----------
         reply = ""
         action = "none"
         reason = ""
@@ -988,7 +1057,6 @@ class MinecraftManagerGUI(ctk.CTk):
             pass
 
     def _ai_say(self, text):
-        """通过 RCON 把 AI 回复发到聊天栏。"""
         safe = text.replace('"', '\\"').replace("\n", " ")
         if len(safe) > 200:
             safe = safe[:200] + "…"
@@ -1002,7 +1070,6 @@ class MinecraftManagerGUI(ctk.CTk):
         self.quick_rcon(f"tellraw @a {payload}")
 
     def _execute_moderation(self, player, action, reason):
-        """执行 AI 审核动作。"""
         reason_str = reason or "违反服务器规则"
         broadcast = self.config_data.get("ai_moderation_broadcast", True)
 
@@ -1113,7 +1180,6 @@ class MinecraftManagerGUI(ctk.CTk):
                             self.log_to_console,
                         )
 
-                # 全局清理
                 if (self.config_data.get("global_clean_enabled")
                         and self.is_running
                         and self.rcon_client
@@ -1124,7 +1190,6 @@ class MinecraftManagerGUI(ctk.CTk):
                         self._last_drop_clean = time.time()
                         self._trigger_drop_clean()
 
-                # 清理区独立清理：全局清理关闭时执行
                 if (not self.config_data.get("global_clean_enabled")
                         and self.is_running
                         and self.rcon_client

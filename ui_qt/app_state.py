@@ -197,7 +197,7 @@ class AppState(QObject):
             self.quick_rcon(cmd)
 
     # ========================================================
-    #  服务器生命周期
+    #  服务器启动
     # ========================================================
     def start_server(self):
         if self.is_running:
@@ -207,6 +207,24 @@ class AppState(QObject):
                          daemon=True).start()
 
     def _start_server_worker(self):
+        """外壳：捕获所有异常，保证信号始终发出。"""
+        try:
+            self._do_start_server()
+        except Exception as e:
+            import traceback
+            self.log(f"启动服务器出错：{e}", "error")
+            try:
+                tb = traceback.format_exc()
+                for line in tb.splitlines()[-8:]:
+                    self.log(f"  {line}", "error")
+            except Exception:
+                pass
+            # ★ 无论如何要复位 UI
+            self.server_stopped.emit()
+
+    def _do_start_server(self):
+        """实际启动逻辑。"""
+        # ---- 1. 检查是否有已运行的服务端 ----
         existing = pm.find_running_server(self.server_path)
         if existing:
             self.log(
@@ -215,17 +233,25 @@ class AppState(QObject):
             self._take_over(existing)
             return
 
+        # ---- 2. 校验 Java 和 jar ----
         java_path = Path(self.config_data.get("java_path", ""))
         if not java_path.exists():
             self.log(f"找不到 Java：{java_path}", "error")
             self.server_stopped.emit()
             return
+
         if not self.server_path.exists():
             self.log(f"服务器目录不存在：{self.server_path}", "error")
             self.server_stopped.emit()
             return
 
-        jars = sorted(self.server_path.glob("*.jar"))
+        try:
+            jars = sorted(self.server_path.glob("*.jar"))
+        except Exception as e:
+            self.log(f"扫描 jar 失败：{e}", "error")
+            self.server_stopped.emit()
+            return
+
         if not jars:
             self.log("未找到 .jar 文件", "error")
             self.server_stopped.emit()
@@ -243,6 +269,7 @@ class AppState(QObject):
 
         self.log(f"启动服务端：{jar.name}  Xmx={xmx} Xms={xms}", "info")
 
+        # ---- 3. 启动进程 ----
         try:
             proc = pm.launch_detached(cmd, self.server_path)
         except Exception as e:
@@ -250,8 +277,13 @@ class AppState(QObject):
             self.server_stopped.emit()
             return
 
+        # ---- 4. 记录状态 ----
         time.sleep(0.3)
-        ct = pm.get_create_time(proc.pid) or time.time()
+        try:
+            ct = pm.get_create_time(proc.pid) or time.time()
+        except Exception:
+            ct = time.time()
+
         self._server_pid = proc.pid
         self._server_create_time = ct
         self._is_external = False
@@ -259,19 +291,48 @@ class AppState(QObject):
         self.start_time = time.time()
         self._user_stopping = False
 
-        pm.save_state({
-            "pid": proc.pid,
-            "create_time": ct,
-            "start_time": self.start_time,
-        })
+        try:
+            pm.save_state({
+                "pid": proc.pid,
+                "create_time": ct,
+                "start_time": self.start_time,
+            })
+        except Exception:
+            pass
 
+        # ---- 5. ★ 立即发信号：UI 马上切"运行中" ----
         self.server_started.emit()
-        self._start_log_watcher()
-        threading.Thread(target=self._watch_process, daemon=True).start()
 
-        # 等 RCON 就绪
-        self._wait_rcon_ready(timeout=60)
-        self._connect_rcon()
+        # ---- 6. 启动日志监控 ----
+        try:
+            self._start_log_watcher()
+        except Exception as e:
+            self.log(f"日志监控启动失败：{e}", "warn")
+
+        # ---- 7. 启动进程监控 ----
+        try:
+            threading.Thread(target=self._watch_process,
+                             daemon=True).start()
+        except Exception:
+            pass
+
+        # ---- 8. RCON 连接放到独立线程，避免阻塞启动流程 ----
+        try:
+            threading.Thread(target=self._connect_rcon_delayed,
+                             daemon=True).start()
+        except Exception:
+            pass
+
+    def _connect_rcon_delayed(self):
+        """等 RCON 就绪后连接（独立线程）。"""
+        try:
+            self._wait_rcon_ready(timeout=90)
+        except Exception:
+            pass
+        try:
+            self._connect_rcon()
+        except Exception as e:
+            self.log(f"RCON 连接线程出错：{e}", "warn")
 
     def _take_over(self, existing):
         self._server_pid = existing["pid"]
@@ -280,30 +341,58 @@ class AppState(QObject):
         self.is_running = True
         self.start_time = time.time()
 
-        pm.save_state({
-            "pid": self._server_pid,
-            "create_time": self._server_create_time,
-            "start_time": self.start_time,
-        })
+        try:
+            pm.save_state({
+                "pid": self._server_pid,
+                "create_time": self._server_create_time,
+                "start_time": self.start_time,
+            })
+        except Exception:
+            pass
 
         self.server_started.emit()
-        self._start_log_watcher()
-        threading.Thread(target=self._connect_rcon, daemon=True).start()
-        threading.Thread(target=self._watch_process, daemon=True).start()
+
+        try:
+            self._start_log_watcher()
+        except Exception as e:
+            self.log(f"日志监控启动失败：{e}", "warn")
+
+        try:
+            threading.Thread(target=self._connect_rcon,
+                             daemon=True).start()
+        except Exception:
+            pass
+
+        try:
+            threading.Thread(target=self._watch_process,
+                             daemon=True).start()
+        except Exception:
+            pass
 
     def _detect_running_server(self):
         try:
             running = pm.find_running_server(self.server_path)
         except Exception:
             running = None
-        if not running:
-            pm.clear_state()
-            return
-        self.log(
-            f"检测到已在运行的服务端（PID {running['pid']}），正在接管…",
-            "info")
-        self._take_over(running)
 
+        if not running:
+            try:
+                pm.clear_state()
+            except Exception:
+                pass
+            return
+
+        try:
+            self.log(
+                f"检测到已在运行的服务端（PID {running['pid']}），正在接管…",
+                "info")
+            self._take_over(running)
+        except Exception as e:
+            self.log(f"接管失败：{e}", "warn")
+
+    # ========================================================
+    #  服务器停止
+    # ========================================================
     def stop_server(self):
         if not self.is_running:
             return
@@ -314,6 +403,14 @@ class AppState(QObject):
                          daemon=True).start()
 
     def _stop_server_worker(self):
+        try:
+            self._do_stop_server()
+        except Exception as e:
+            self.log(f"停止服务器出错：{e}", "error")
+            self._on_server_exited()
+
+    def _do_stop_server(self):
+        # 优先用 RCON 优雅停止
         if self.rcon_client and self.rcon_client.connected:
             try:
                 self.rcon_client.command("stop")
@@ -342,6 +439,7 @@ class AppState(QObject):
         if (not self.is_running and self._server_pid is None
                 and self.start_time is None):
             return
+
         was_running = self.is_running
         user_stopped = self._user_stopping
 
@@ -359,7 +457,10 @@ class AppState(QObject):
                 pass
             self.rcon_client = None
 
-        pm.clear_state()
+        try:
+            pm.clear_state()
+        except Exception:
+            pass
 
         if self._log_watcher:
             try:
@@ -390,6 +491,7 @@ class AppState(QObject):
     #  RCON 连接
     # ========================================================
     def _wait_rcon_ready(self, timeout=60):
+        """轮询服务端日志，等到 RCON 监听器启动再返回。"""
         log_path = self.server_path / "logs" / "latest.log"
         start = time.time()
         while time.time() - start < timeout:
@@ -429,6 +531,7 @@ class AppState(QObject):
                 client.disconnect()
                 self.log(f"RCON 连接失败（第 {attempt} 次）：{e}", "warn")
             time.sleep(3)
+
         self.log("RCON 连接失败，指令不可用", "error")
 
     def _on_rcon_connected(self):
@@ -442,10 +545,17 @@ class AppState(QObject):
                 self.server_info.detect_from_rcon(self.rcon_client)
             except Exception:
                 pass
-            self.perm_manager.update_server_version(self.server_info.version)
+            try:
+                self.perm_manager.update_server_version(
+                    self.server_info.version)
+            except Exception:
+                pass
             self.log(f"服务端：{self.server_info.summary()}", "ok")
 
-        threading.Thread(target=_detect, daemon=True).start()
+        try:
+            threading.Thread(target=_detect, daemon=True).start()
+        except Exception:
+            pass
 
         try:
             self.server_context.invalidate()
@@ -484,6 +594,7 @@ class AppState(QObject):
     def _on_server_log_line(self, line):
         msg = re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s+", "", line)
         low = msg.lower()
+
         if re.search(r"<[^>]+>\s+\S", msg):
             tag = "player"
         elif re.search(r"System chat:\s*\[([^\]:]+):\s*(.+?)\]", msg):
@@ -494,6 +605,7 @@ class AppState(QObject):
             tag = "warn"
         else:
             tag = "server"
+
         self.log(msg, tag)
 
     def _on_player_command(self, player, cmd_name, raw_cmd, source="exact"):
@@ -501,12 +613,15 @@ class AppState(QObject):
             self.log(f"{player} 执行：{raw_cmd}", "player_cmd")
         except Exception:
             pass
+
         try:
             ok, reason = self.perm_manager.check(player, cmd_name)
         except Exception:
             return
+
         if ok:
             return
+
         try:
             self.perm_manager.on_violation(player, cmd_name, raw_cmd)
         except Exception:
@@ -523,6 +638,7 @@ class AppState(QObject):
 
         should_reply = False
         clean_message = message
+
         if chat_on:
             trigger = self.config_data.get("ai_chat_trigger", "").strip()
             if not trigger:
@@ -537,16 +653,20 @@ class AppState(QObject):
 
         cooldowns = []
         if should_reply:
-            cooldowns.append(int(self.config_data.get("ai_chat_cooldown", 5)))
+            cooldowns.append(
+                int(self.config_data.get("ai_chat_cooldown", 5)))
         if should_moderate:
-            cooldowns.append(int(self.config_data.get(
-                "ai_moderation_cooldown", 3)))
+            cooldowns.append(
+                int(self.config_data.get("ai_moderation_cooldown", 3)))
+
         required_gap = max(cooldowns) if cooldowns else 5
 
         now = time.time()
-        global_gap = float(self.config_data.get("ai_global_cooldown", 1.0))
+        global_gap = float(
+            self.config_data.get("ai_global_cooldown", 1.0))
         if global_gap > 0 and now - self._last_ai_call_time < global_gap:
             return
+
         last_per = self._last_ai_call_per_player.get(player, 0)
         if now - last_per < required_gap:
             return
@@ -578,9 +698,11 @@ class AppState(QObject):
                     self.config_data.get("ai_context_ttl", 30))
             except Exception:
                 pass
+
             summary = self.server_context.get_summary()
             if summary:
                 context_blocks.append(summary)
+
             if should_reply:
                 detail = self.server_context.get_player_detail(player)
                 if detail:
@@ -596,6 +718,7 @@ class AppState(QObject):
 
         messages = [{"role": "system", "content": full_system}]
         ctx_n = int(self.config_data.get("ai_context_lines", 10))
+
         for entry in self.ai_history.recent(ctx_n):
             messages.append({
                 "role": "user",
@@ -613,13 +736,14 @@ class AppState(QObject):
         if should_moderate:
             note_parts.append("审核这条消息是否违规")
         note = "；".join(note_parts)
+
         messages.append({
             "role": "user",
             "content": f"<{player}> {clean_message}\n\n[{note}]",
         })
 
-        reply_text, err = client.chat(messages, temperature=0.7,
-                                       max_tokens=400)
+        reply_text, err = client.chat(
+            messages, temperature=0.7, max_tokens=400)
         if err:
             self.log(f"AI 请求失败：{err}", "error")
             return
@@ -627,6 +751,7 @@ class AppState(QObject):
         reply = ""
         action = "none"
         reason = ""
+
         try:
             clean = (reply_text or "").strip()
             if clean.startswith("```"):
@@ -649,6 +774,7 @@ class AppState(QObject):
 
         if reply and should_reply:
             self._ai_say(reply)
+
         if action != "none" and should_moderate:
             self._execute_moderation(player, action, reason)
 
@@ -667,6 +793,7 @@ class AppState(QObject):
         safe = text.replace('"', '\\"').replace("\n", " ")
         if len(safe) > 200:
             safe = safe[:200] + "…"
+
         payload = _json.dumps({
             "text": "",
             "extra": [
@@ -678,6 +805,7 @@ class AppState(QObject):
 
     def _execute_moderation(self, player, action, reason):
         reason_str = reason or "违反服务器规则"
+
         if action == "warn":
             safe = reason_str.replace('"', '\\"')
             payload = _json.dumps({
@@ -688,6 +816,7 @@ class AppState(QObject):
             self.quick_rcon(f"kick {player} {reason_str}", silent=True)
         elif action == "ban":
             self.quick_rcon(f"ban {player} {reason_str}", silent=True)
+
         self.log(f"AI 审核：{player} → {action}  ({reason_str})", "warn")
 
     # ========================================================
@@ -704,6 +833,7 @@ class AppState(QObject):
 
     def _refresh_stats(self):
         stats = {}
+
         if self._server_pid:
             try:
                 import psutil
@@ -727,6 +857,7 @@ class AppState(QObject):
                         stats["tps"] = float(m.group(1))
             except Exception:
                 pass
+
             try:
                 resp = client.command("list") or ""
                 m = re.search(r"There are (\d+) of a max of (\d+)", resp)
@@ -745,7 +876,8 @@ class AppState(QObject):
             try:
                 if (self.config_data.get("auto_backup_enabled")
                         and self.is_running
-                        and self.rcon_client and self.rcon_client.connected):
+                        and self.rcon_client
+                        and self.rcon_client.connected):
                     interval = int(self.config_data.get(
                         "auto_backup_interval_min", 60)) * 60
                     if time.time() - self._last_auto_backup >= interval:
@@ -754,13 +886,15 @@ class AppState(QObject):
                         self.do_backup(wait=True)
                         rotate_backups(
                             self.server_path,
-                            int(self.config_data.get("auto_backup_keep", 10)),
+                            int(self.config_data.get(
+                                "auto_backup_keep", 10)),
                             self.log,
                         )
 
                 if (self.config_data.get("global_clean_enabled")
                         and self.is_running
-                        and self.rcon_client and self.rcon_client.connected):
+                        and self.rcon_client
+                        and self.rcon_client.connected):
                     interval = int(self.config_data.get(
                         "auto_drop_clean_interval_min", 30)) * 60
                     if time.time() - self._last_drop_clean >= interval:
@@ -769,7 +903,8 @@ class AppState(QObject):
 
                 if (not self.config_data.get("global_clean_enabled")
                         and self.is_running
-                        and self.rcon_client and self.rcon_client.connected):
+                        and self.rcon_client
+                        and self.rcon_client.connected):
                     self._tick_clean_zones()
             except Exception:
                 pass
@@ -779,23 +914,29 @@ class AppState(QObject):
         zones = self.clean_zones_data.get("zones", [])
         now = time.time()
         changed = False
+
         for zone in zones:
             if not zone.get("enabled", True):
                 continue
+
             interval = int(zone.get("interval_min", 15)) * 60
             last = float(zone.get("last_clean", 0.0) or 0.0)
             if now - last < interval:
                 continue
+
             cmd = build_clean_zone_command(zone)
             if not cmd:
                 continue
+
             try:
                 self.rcon_client.command(cmd)
                 self.log(f"清理区「{zone.get('name')}」自动清理", "info")
                 zone["last_clean"] = now
                 changed = True
             except Exception as e:
-                self.log(f"清理区「{zone.get('name')}」清理失败：{e}", "warn")
+                self.log(
+                    f"清理区「{zone.get('name')}」清理失败：{e}", "warn")
+
         if changed:
             save_clean_zones(self.clean_zones_data)
 
@@ -823,7 +964,9 @@ class AppState(QObject):
                     "say §e[系统] §f5 秒后清理地面掉落物，请及时捡取。")
             except Exception:
                 pass
+
             time.sleep(5)
+
             if not active:
                 try:
                     self.rcon_client.command("kill @e[type=item]")
@@ -831,6 +974,7 @@ class AppState(QObject):
                 except Exception as e:
                     self.log(f"清理失败：{e}", "error")
                 return
+
             dims = set()
             for z in active:
                 zd = z.get("dimension", "")
@@ -839,6 +983,7 @@ class AppState(QObject):
                     break
                 if zd in DIMENSION_KEYS:
                     dims.add(zd)
+
             sent = 0
             for dim in DIMENSION_KEYS:
                 if dim not in dims:
@@ -852,8 +997,10 @@ class AppState(QObject):
                     self.rcon_client.command(cmd)
                 except Exception as e:
                     self.log(f"清理失败：{e}", "warn")
+
             if sent:
                 self.log(f"已按保护区过滤清理（{sent} 个维度）", "ok")
+
         threading.Thread(target=_run, daemon=True).start()
 
     # ========================================================
@@ -874,7 +1021,8 @@ class AppState(QObject):
             return
         self._backup_running = True
         try:
-            perform_backup(self.server_path, self.rcon_client, self.log)
+            perform_backup(
+                self.server_path, self.rcon_client, self.log)
         finally:
             self._backup_running = False
 
@@ -884,10 +1032,12 @@ class AppState(QObject):
     def clear_drops(self):
         zones = self.zones_data.get("zones", [])
         active = [z for z in zones if z.get("enabled", True)]
+
         if not active:
             self.quick_rcon("kill @e[type=item]")
             self.log("已发送全清掉落物指令", "ok")
             return
+
         dims = set()
         for z in active:
             zd = z.get("dimension", "")
@@ -896,6 +1046,7 @@ class AppState(QObject):
                 break
             if zd in DIMENSION_KEYS:
                 dims.add(zd)
+
         sent = 0
         for dim in DIMENSION_KEYS:
             if dim not in dims:
@@ -905,7 +1056,9 @@ class AppState(QObject):
                 continue
             sent += 1
             self.quick_rcon(cmd)
-        self.log(f"已按保护区过滤清理（{len(active)} 个保护区）", "ok")
+
+        self.log(
+            f"已按保护区过滤清理（{len(active)} 个保护区）", "ok")
 
     # ========================================================
     #  配置保存
@@ -916,7 +1069,8 @@ class AppState(QObject):
                 self.server_id,
                 name=self.current_server.get("name"),
                 config=self.config_data):
-            self.server_path = Path(self.config_data.get("server_path", "."))
+            self.server_path = Path(
+                self.config_data.get("server_path", "."))
             return True
         return False
 
@@ -971,7 +1125,8 @@ class AppState(QObject):
         self.server_id = server_id
         self.current_server = server
         self.config_data = dict(server["config"])
-        self.server_path = Path(self.config_data.get("server_path", "."))
+        self.server_path = Path(
+            self.config_data.get("server_path", "."))
 
         self.data_dir = registry.get_data_dir(server_id)
         set_perm_dir(self.data_dir)
@@ -992,6 +1147,7 @@ class AppState(QObject):
         self._server_pid = None
         self._server_create_time = None
         self._is_external = False
+
         try:
             self.server_context.invalidate()
         except Exception:
@@ -1002,6 +1158,7 @@ class AppState(QObject):
                          daemon=True).start()
 
         self.log(
-            f"已切换到服务器：{self.current_server.get('name', server_id)}",
+            f"已切换到服务器："
+            f"{self.current_server.get('name', server_id)}",
             "ok")
         return True

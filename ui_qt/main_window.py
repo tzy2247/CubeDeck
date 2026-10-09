@@ -19,7 +19,7 @@ from ui_qt.pages.backup import BackupPage
 from ui_qt.pages.properties import PropertiesPage
 from ui_qt.pages.ai import AIPage
 from ui_qt.pages.settings import SettingsPage
-
+from ui_qt.pages.plugin_store import PluginStorePage
 
 NAV_ITEMS = [
     "仪表盘",
@@ -31,6 +31,7 @@ NAV_ITEMS = [
     "备份管理",
     "服务器属性",
     "AI 助手",
+    "插件商店",
     "设置",
 ]
 
@@ -193,6 +194,7 @@ class MainWindow(QMainWindow):
             BackupPage(self.state),
             PropertiesPage(self.state),
             AIPage(self.state),
+            PluginStorePage(self.state),
             SettingsPage(self.state),
         ]
         for p in self._pages:

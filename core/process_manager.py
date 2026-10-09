@@ -10,6 +10,7 @@ import psutil
 
 from core import paths
 
+
 STATE_FILE = paths.STATE_FILE
 
 
@@ -28,7 +29,7 @@ def load_state():
 
 def save_state(data):
     try:
-        paths.ensure_data_root()
+        paths.ensure_userdata_root()
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
         return True
@@ -52,9 +53,6 @@ def launch_detached(cmd, cwd):
     以脱离父进程的方式启动 Java 服务端。
     - Windows: DETACHED_PROCESS + CREATE_NO_WINDOW
     - Linux/Mac: start_new_session=True
-
-    启动后 stdin/stdout/stderr 都与管理器断开，
-    服务端自己写日志到 logs/latest.log。
     """
     if sys.platform == "win32":
         flags = (
@@ -87,30 +85,55 @@ def launch_detached(cmd, cwd):
 # ============================================================
 def find_running_server(server_path):
     """
-    在 server_path 目录下查找正在运行的 Java 服务端进程。
-    匹配条件：java.exe + 工作目录 == server_path + 命令行包含目录下的 jar。
+    查找正在运行的服务端。
+    优先从状态文件读取 PID，避免遍历所有进程（性能 + 稳定性）。
     返回 dict 或 None。
     """
-    target_dir = str(Path(server_path).resolve())
-    my_pid = os.getpid()
+    # ---------- 1. 优先读状态文件 ----------
+    state = load_state()
+    pid = state.get("pid")
+    create_time = state.get("create_time")
 
-    jar_names = [j.name.lower() for j in Path(server_path).glob("*.jar")]
+    if pid and is_process_alive(pid, create_time):
+        try:
+            p = psutil.Process(pid)
+            pname = (p.name() or "").lower()
+            if "java" in pname:
+                return {
+                    "pid": pid,
+                    "create_time": create_time or 0.0,
+                    "cmdline": " ".join(p.cmdline() or [])[:200],
+                }
+        except Exception:
+            pass
+
+    # ---------- 2. 状态文件不可信，遍历进程（兜底）----------
+    try:
+        target_dir = str(Path(server_path).resolve())
+    except Exception:
+        return None
+
+    try:
+        jar_names = [
+            j.name.lower()
+            for j in Path(server_path).glob("*.jar")
+        ]
+    except Exception:
+        jar_names = []
 
     for proc in psutil.process_iter(
             ["pid", "name", "cmdline", "create_time"]):
         try:
-            pid = proc.info["pid"]
-            if pid == my_pid:
-                continue
-
             name = (proc.info.get("name") or "").lower()
             if "java" not in name:
                 continue
 
+            # ★ 捕获所有异常，不再只捕两种
             try:
                 cwd = proc.cwd()
-            except (psutil.AccessDenied, psutil.NoSuchProcess):
+            except Exception:
                 continue
+
             if os.path.normcase(cwd) != os.path.normcase(target_dir):
                 continue
 
@@ -119,13 +142,12 @@ def find_running_server(server_path):
                 continue
 
             return {
-                "pid": pid,
+                "pid": proc.info["pid"],
                 "create_time": proc.info.get("create_time") or 0.0,
                 "cmdline": cmdline[:200],
             }
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
         except Exception:
+            # ★ 单个进程出错不影响整体
             continue
 
     return None
@@ -135,9 +157,7 @@ def find_running_server(server_path):
 #  进程存活检查
 # ============================================================
 def is_process_alive(pid, create_time=None):
-    """
-    检查 pid 是否存活。若传入 create_time，用它防止 PID 复用误判。
-    """
+    """检查 pid 是否存活。若传入 create_time，用它防止 PID 复用误判。"""
     if not pid:
         return False
     try:
@@ -165,10 +185,7 @@ def get_create_time(pid):
 #  停止进程
 # ============================================================
 def kill_process(pid, create_time=None, timeout=10):
-    """
-    先 terminate，超时后 kill。
-    返回 True 表示已确认进程退出。
-    """
+    """先 terminate，超时后 kill。返回 True 表示已确认进程退出。"""
     if not is_process_alive(pid, create_time):
         return True
     try:

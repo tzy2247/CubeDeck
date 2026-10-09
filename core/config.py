@@ -29,6 +29,12 @@ DEFAULT_CONFIG = {
     "background_image": "",
     "background_dim": 120,  # 0-255，图片叠加深色遮罩的强度
 
+    # ---------- 插件商店 ----------
+    "modrinth_proxy": "",
+    "modrinth_api_base": "",
+    "curseforge_api_key": "",
+    "store_source": "modrinth",  # 上次使用的源
+
     # ---------- AI 助手 ----------
     "ai_enabled": False,
     "ai_base_url": "https://api.openai.com/v1",

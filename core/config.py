@@ -5,9 +5,9 @@ from pathlib import Path
 CONFIG_PATH = Path("server_config.json")
 
 DEFAULT_CONFIG = {
-    "server_path":              r"D:\gaming\Minecraft\server\26.3",
-    "java_path":                r"C:\Program Files\Java\jdk-17\bin\java.exe",
-    "rcon_password":            "your_password",
+    "server_path":              r"D:\server\26.3",
+    "java_path":                r"C:\Program Files\Java\jdk-21\bin\java.exe",
+    "rcon_password":            "",
     "rcon_port":                25575,
     "memory_xmx":               "4G",
     "memory_xms":               "2G",

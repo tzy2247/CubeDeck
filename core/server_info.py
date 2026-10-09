@@ -28,19 +28,24 @@ class ServerInfo:
         except Exception:
             return
 
+        # 类型
         for name, pat in SERVER_PATTERNS:
             if re.search(pat, head, re.IGNORECASE):
                 self.type = name
                 break
 
-        m = re.search(r"MC:\s*(\d+)\.(\d+)(?:\.(\d+))?", head)
-        if m:
-            self.version = tuple(int(x) for x in m.groups() if x)
-            return
-        m = re.search(
-            r"Minecraft server version\s+(\d+)\.(\d+)(?:\.(\d+))?", head)
-        if m:
-            self.version = tuple(int(x) for x in m.groups() if x)
+        # 版本：多种可能格式，统一忽略大小写
+        version_patterns = [
+            r"Minecraft server version\s+(\d+)\.(\d+)(?:\.(\d+))?",
+            r"Starting minecraft server version\s+(\d+)\.(\d+)(?:\.(\d+))?",
+            r"MC:\s*(\d+)\.(\d+)(?:\.(\d+))?",
+            r"Loading Minecraft\s+(\d+)\.(\d+)(?:\.(\d+))?",
+        ]
+        for pat in version_patterns:
+            m = re.search(pat, head, re.IGNORECASE)
+            if m:
+                self.version = tuple(int(x) for x in m.groups() if x)
+                return
 
     def detect_from_rcon(self, rcon):
         if not (rcon and getattr(rcon, "connected", False)):
@@ -64,9 +69,10 @@ class ServerInfo:
         elif "fabric" in low:
             self.type = "fabric"
 
-        m = re.search(r"MC:\s*(\d+)\.(\d+)(?:\.(\d+))?", resp)
+        # 版本：先找 MC: 前缀，再找纯数字
+        m = re.search(r"MC:\s*(\d+)\.(\d+)(?:\.(\d+))?", resp, re.IGNORECASE)
         if not m:
-            m = re.search(r"version\s+(\d+)\.(\d+)(?:\.(\d+))?", resp)
+            m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", resp)
         if m:
             self.version = tuple(int(x) for x in m.groups() if x)
 

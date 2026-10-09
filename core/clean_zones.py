@@ -2,7 +2,17 @@
 import json
 from pathlib import Path
 
-CLEAN_ZONES_FILE = Path("clean_zones.json")
+_data_dir = Path(".")
+
+
+def set_data_dir(d):
+    global _data_dir
+    _data_dir = Path(d)
+
+
+def _clean_zones_file():
+    return _data_dir / "clean_zones.json"
+
 
 DIMENSION_CN = {
     "minecraft:overworld": "主世界",
@@ -13,9 +23,10 @@ DIMENSION_KEYS = list(DIMENSION_CN.keys())
 
 
 def load_clean_zones():
-    if CLEAN_ZONES_FILE.exists():
+    path = _clean_zones_file()
+    if path.exists():
         try:
-            with open(CLEAN_ZONES_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if "zones" not in data:
                 data["zones"] = []
@@ -28,7 +39,9 @@ def load_clean_zones():
 
 def save_clean_zones(data):
     try:
-        with open(CLEAN_ZONES_FILE, "w", encoding="utf-8") as f:
+        path = _clean_zones_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
         return True
     except Exception:

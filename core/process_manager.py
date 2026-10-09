@@ -8,7 +8,9 @@ from pathlib import Path
 
 import psutil
 
-STATE_FILE = Path("server_state.json")
+from core import paths
+
+STATE_FILE = paths.STATE_FILE
 
 
 # ============================================================
@@ -26,6 +28,7 @@ def load_state():
 
 def save_state(data):
     try:
+        paths.ensure_data_root()
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
         return True

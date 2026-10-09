@@ -149,3 +149,72 @@ for _name, _t in THEMES.items():
 # 重新同步到全局 C
 C.clear()
 C.update(THEMES[_current_theme])
+
+# ============================================================
+#  按钮样式辅助
+# ============================================================
+def accent_btn_kwargs():
+    """主操作按钮：蓝底白字"""
+    return {
+        "fg_color": C["accent"],
+        "hover_color": C["accent_hover"],
+        "text_color": "#ffffff",
+    }
+
+
+def green_btn_kwargs():
+    """成功/启动按钮：绿底白字"""
+    return {
+        "fg_color": C["green"],
+        "hover_color": C["green_hover"],
+        "text_color": "#ffffff",
+    }
+
+
+def red_btn_kwargs():
+    """危险/停止按钮：红底白字"""
+    return {
+        "fg_color": C["red"],
+        "hover_color": C["red_hover"],
+        "text_color": "#ffffff",
+    }
+
+
+def orange_btn_kwargs():
+    """警告按钮：橙底白字"""
+    return {
+        "fg_color": C["orange"],
+        "hover_color": C["orange_hover"],
+        "text_color": "#ffffff",
+    }
+
+
+def purple_btn_kwargs():
+    """备份/次要操作按钮：紫底白字"""
+    return {
+        "fg_color": C["purple"],
+        "hover_color": C["purple_hover"],
+        "text_color": "#ffffff",
+    }
+
+
+def ghost_btn_kwargs():
+    """透明边框按钮：刷新/取消/次要操作"""
+    return {
+        "fg_color": "transparent",
+        "hover_color": C["card_hover"],
+        "border_width": 1,
+        "border_color": C["border"],
+        "text_color": C["text_dim"],
+    }
+
+
+def danger_ghost_btn_kwargs():
+    """危险操作的透明按钮：删除/移除"""
+    return {
+        "fg_color": "transparent",
+        "hover_color": "#3b1f24",
+        "border_width": 1,
+        "border_color": C["border"],
+        "text_color": C["text_dim"],
+    }

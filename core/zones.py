@@ -2,7 +2,17 @@
 import json
 from pathlib import Path
 
-ZONES_FILE = Path("protected_zones.json")
+_data_dir = Path(".")
+
+
+def set_data_dir(d):
+    global _data_dir
+    _data_dir = Path(d)
+
+
+def _zones_file():
+    return _data_dir / "protected_zones.json"
+
 
 DIMENSION_CN = {
     "minecraft:overworld": "主世界",
@@ -12,13 +22,14 @@ DIMENSION_CN = {
 }
 DIMENSION_KEYS = ["minecraft:overworld", "minecraft:the_nether",
                   "minecraft:the_end"]
-DIMENSION_OPTIONS = list(DIMENSION_CN.values())   # 含"全部维度"
+DIMENSION_OPTIONS = list(DIMENSION_CN.values())
 
 
 def load_zones():
-    if ZONES_FILE.exists():
+    path = _zones_file()
+    if path.exists():
         try:
-            with open(ZONES_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if "zones" not in data:
                 data["zones"] = []
@@ -31,7 +42,9 @@ def load_zones():
 
 def save_zones(data):
     try:
-        with open(ZONES_FILE, "w", encoding="utf-8") as f:
+        path = _zones_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
         return True
     except Exception:

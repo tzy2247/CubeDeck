@@ -4,6 +4,18 @@ import threading
 import time
 from pathlib import Path
 
+# 这些行是服务端对 RCON 内部命令的技术回应，不显示给用户
+IGNORE_LOG_LINES = (
+    "Automatic saving is now disabled",
+    "Automatic saving is now enabled",
+    "Saving is now disabled",
+    "Saving is now enabled",
+    "Saved the game",
+    "Saving the game",
+    "Thread RCON Client",
+    "Thread RCON Listener",
+    "RCON running on",
+)
 
 # ---------- 精确模式（Paper/Spigot log-player-commands） ----------
 EXACT_PATTERNS = [
@@ -179,6 +191,16 @@ class LogWatcher(threading.Thread):
     def _handle_line(self, line: str):
         self.line_count += 1
         self.last_line = line[:240]
+
+        self.line_count += 1
+        self.last_line = line[:240]
+
+        # ★ 过滤服务端的技术性回应
+        for ignore in IGNORE_LOG_LINES:
+            if ignore in line:
+                # 仍需回调 on_line，让控制台看到完整日志（可选）
+                # 若不想让用户看到，直接 return 即可
+                return
 
         # ---- 全行回调（给控制台显示）----
         if self.on_line:

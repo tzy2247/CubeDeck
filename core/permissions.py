@@ -5,10 +5,22 @@ from pathlib import Path
 
 from core.commands import all_known_commands
 
-PERM_FILE = Path("permissions.json")
+
+# 数据目录由 app 注入
+_data_dir = Path(".")
+
+
+def set_data_dir(d):
+    global _data_dir
+    _data_dir = Path(d)
+
+
+def _perm_file():
+    return _data_dir / "permissions.json"
+
 
 DEFAULT_PERM = {
-    "enforcement_mode": "log",       # off / log / warn / kick / ban
+    "enforcement_mode": "log",
     "check_window_seconds": 300,
     "violations_to_kick": 3,
     "violations_to_ban": 10,
@@ -22,9 +34,10 @@ DEFAULT_PERM = {
 
 
 def load_permissions():
-    if PERM_FILE.exists():
+    path = _perm_file()
+    if path.exists():
         try:
-            with open(PERM_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for k, v in DEFAULT_PERM.items():
                 data.setdefault(k, v)
@@ -37,12 +50,14 @@ def load_permissions():
 
 def save_permissions(data):
     try:
-        with open(PERM_FILE, "w", encoding="utf-8") as f:
+        path = _perm_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
         return True
     except Exception:
         return False
-
+    
 
 class PermissionManager:
     """权限检查与执法。"""

@@ -17,7 +17,9 @@ DEFAULT_CONFIG = {
     "auto_backup_keep":         10,
     "auto_restart":             False,
     "keep_server_on_exit":      True,
-
+    # ---------- 语言文件 ----------
+    "lang_file_path": "",
+    "lang_dir_path": "",
     # 全局掉落物清理
     "global_clean_enabled":          False,
     "auto_drop_clean_interval_min":  30,

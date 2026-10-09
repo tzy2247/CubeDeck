@@ -3,18 +3,26 @@ import json
 import threading
 from pathlib import Path
 
-HISTORY_FILE = Path("ai_chat_history.json")
+_data_dir = Path(".")
 MAX_ENTRIES = 5000
 
 
+def set_data_dir(d):
+    global _data_dir
+    _data_dir = Path(d)
+
+
+def _history_file():
+    return _data_dir / "ai_chat_history.json"
+
+
 class AIHistory:
-    def __init__(self, path=HISTORY_FILE, max_entries=MAX_ENTRIES):
-        self.path = Path(path)
+    def __init__(self, path=None, max_entries=MAX_ENTRIES):
+        self.path = Path(path) if path else _history_file()
         self.max_entries = max_entries
         self._entries = []
         self._lock = threading.Lock()
         self._load()
-
     # ---------- 读写 ----------
     def _load(self):
         if not self.path.exists():

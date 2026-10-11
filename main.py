@@ -3,18 +3,14 @@ import sys
 import os
 import io
 import gc
+from pathlib import Path
 
 # 预导入 netrc，规避 Python 3.12 + requests 惰性导入 netrc 的 GC abort
 import netrc  # noqa: F401
 
-from pathlib import Path
-
 
 # ============================================================
-#  ★ 兜底 stdout / stderr
-#  无控制台模式（pythonw / PyInstaller console=False）下
-#  sys.stdout 和 sys.stderr 会是 None，导致任何 print 或
-#  faulthandler.enable() 崩溃。
+#  兜底 stdout / stderr
 # ============================================================
 def _ensure_std_streams():
     if sys.stdout is None:
@@ -28,16 +24,30 @@ def _ensure_std_streams():
 _ensure_std_streams()
 
 
+# ============================================================
+#  ★ 资源路径解析（打包 / 开发环境通用）
+# ============================================================
+def resource_path(relative: str) -> str:
+    """
+    获取资源的绝对路径。
+    - 打包后：从 sys._MEIPASS 取
+    - 开发时：从项目根目录取
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if base is None:
+        # 未打包：以 main.py 所在目录为根
+        base = os.path.dirname(os.path.abspath(__file__))
+    return str(Path(base) / relative)
+
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import QTimer
 
 from ui_qt.main_window import MainWindow
 from core import paths
 
 
 def run():
-    # faulthandler 需要 stderr，放在 _ensure_std_streams 之后
     import faulthandler
     try:
         faulthandler.enable()
@@ -49,16 +59,15 @@ def run():
     app = QApplication(sys.argv)
     app.setApplicationName("CubeDeck")
 
-    # ★ 完全禁用 Python GC（Python 3.12 + PySide6 会有 access violation）
-    gc.disable()
-
-    # 图标
+    # ★ 用 resource_path 解析图标路径
     try:
-        icon_path = Path("icon.ico")
-        if icon_path.exists():
-            app.setWindowIcon(QIcon(str(icon_path)))
+        icon_path = resource_path("icon.ico")
+        if Path(icon_path).exists():
+            app.setWindowIcon(QIcon(icon_path))
     except Exception:
         pass
+
+    gc.disable()
 
     window = MainWindow()
     window.show()

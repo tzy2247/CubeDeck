@@ -417,8 +417,13 @@ class AppState(QObject):
 
         # ---- 5. 启动进程（stdout 重定向到文件，避免 PIPE 死锁）----
         try:
-            flags = (subprocess.CREATE_NEW_PROCESS_GROUP
-                     if sys.platform == "win32" else 0)
+            if sys.platform == "win32":
+                flags = (
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        | 0x08000000  # CREATE_NO_WINDOW
+                )
+            else:
+                flags = 0
 
             log_dir = self.server_path / "logs"
             try:

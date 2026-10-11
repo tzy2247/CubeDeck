@@ -20,6 +20,7 @@
 
 **支持服务端**：Vanilla / Paper / Purpur / Spigot / Forge / NeoForge / Fabric  
 **版本要求**：Minecraft 1.16.5+
+***你可以下载更低版本的Minecraft，但CubeDeck中的部分功能可能不可用。。。***
 
 ---
 

@@ -67,7 +67,7 @@ class PlayerDetailDialog(QDialog):
 
         # 头部
         header = QHBoxLayout()
-        title = QLabel(f"🎮   {self.player}")
+        title = QLabel(f"{self.player}")
         title.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 22px; font-weight: bold;")
@@ -83,10 +83,10 @@ class PlayerDetailDialog(QDialog):
 
         # Tab
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_inventory_tab(), "🎒  背包")
-        self.tabs.addTab(self._build_teleport_tab(), "🧭  传送")
-        self.tabs.addTab(self._build_buff_tab(), "✨  Buff")
-        self.tabs.addTab(self._build_actions_tab(), "⚡  操作")
+        self.tabs.addTab(self._build_inventory_tab(), "背包")
+        self.tabs.addTab(self._build_teleport_tab(), "传送")
+        self.tabs.addTab(self._build_buff_tab(), "效果")
+        self.tabs.addTab(self._build_actions_tab(), "操作")
         root.addWidget(self.tabs, 1)
 
     # ========================================================
@@ -105,13 +105,13 @@ class PlayerDetailDialog(QDialog):
         top.addWidget(self._inv_status)
         top.addStretch()
 
-        refresh_btn = QPushButton("🔄  刷新")
+        refresh_btn = QPushButton("刷新")
         refresh_btn.setObjectName("Accent")
         refresh_btn.setFixedHeight(34)
         refresh_btn.clicked.connect(self._reload_inventory)
         top.addWidget(refresh_btn)
 
-        clear_btn = QPushButton("🧹  清空背包")
+        clear_btn = QPushButton("清空背包")
         clear_btn.setObjectName("Danger")
         clear_btn.setFixedHeight(34)
         clear_btn.clicked.connect(self._clear_whole_inventory)
@@ -337,7 +337,7 @@ class PlayerDetailDialog(QDialog):
         c1 = QFrame()
         c1.setObjectName("Card")
         l1 = QVBoxLayout(c1)
-        title1 = QLabel("🎲  随机安全传送")
+        title1 = QLabel("随机安全传送")
         title1.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 14px; font-weight: bold;")
@@ -366,7 +366,7 @@ class PlayerDetailDialog(QDialog):
         c2 = QFrame()
         c2.setObjectName("Card")
         l2 = QVBoxLayout(c2)
-        title2 = QLabel("👥  传送到其他玩家")
+        title2 = QLabel("传送到其他玩家")
         title2.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 14px; font-weight: bold;")
@@ -390,7 +390,7 @@ class PlayerDetailDialog(QDialog):
         c3 = QFrame()
         c3.setObjectName("Card")
         l3 = QVBoxLayout(c3)
-        title3 = QLabel("📍  多维度定点传送")
+        title3 = QLabel("多维度定点传送")
         title3.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 14px; font-weight: bold;")
@@ -489,7 +489,7 @@ class PlayerDetailDialog(QDialog):
         cl = QVBoxLayout(card)
         cl.setSpacing(10)
 
-        title = QLabel("✨  给予效果")
+        title = QLabel("给予效果")
         title.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 14px; font-weight: bold;")
@@ -516,13 +516,13 @@ class PlayerDetailDialog(QDialog):
         cl.addLayout(row2)
 
         btn_row = QHBoxLayout()
-        apply_btn = QPushButton("✨  施加效果")
+        apply_btn = QPushButton("施加效果")
         apply_btn.setObjectName("Green")
         apply_btn.setFixedHeight(42)
         apply_btn.clicked.connect(self._apply_effect)
         btn_row.addWidget(apply_btn, 1)
 
-        clear_btn = QPushButton("🚫  清除全部效果")
+        clear_btn = QPushButton("清除全部效果")
         clear_btn.setObjectName("Red")
         clear_btn.setFixedHeight(42)
         clear_btn.clicked.connect(
@@ -562,7 +562,7 @@ class PlayerDetailDialog(QDialog):
         c1 = QFrame()
         c1.setObjectName("Card")
         l1 = QVBoxLayout(c1)
-        t1 = QLabel("💬  服务器私信")
+        t1 = QLabel("服务器私信")
         t1.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 14px; font-weight: bold;")
@@ -587,7 +587,7 @@ class PlayerDetailDialog(QDialog):
         c2 = QFrame()
         c2.setObjectName("Card")
         l2 = QVBoxLayout(c2)
-        t2 = QLabel("🎮  游戏模式")
+        t2 = QLabel("游戏模式")
         t2.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 14px; font-weight: bold;")
@@ -610,7 +610,7 @@ class PlayerDetailDialog(QDialog):
         c3 = QFrame()
         c3.setObjectName("Card")
         l3 = QVBoxLayout(c3)
-        t3 = QLabel("⚡  管理操作")
+        t3 = QLabel("管理操作")
         t3.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 14px; font-weight: bold;")
@@ -618,12 +618,12 @@ class PlayerDetailDialog(QDialog):
 
         act_row = QHBoxLayout()
         actions = [
-            ("🎁  OP", "Green", f"op {self.player}"),
-            ("⛔ 取消OP", "Orange", f"deop {self.player}"),
-            ("👢 踢出", "Orange", f"kick {self.player}"),
-            ("☠ 击杀", "Red", f"kill {self.player}"),
-            ("🚫 封禁", "Red", f"ban {self.player}"),
-            ("🏠 出生点", "Accent",
+            ("OP", "Green", f"op {self.player}"),
+            ("取消OP", "Orange", f"deop {self.player}"),
+            ("踢出", "Orange", f"kick {self.player}"),
+            ("击杀", "Red", f"kill {self.player}"),
+            ("封禁", "Red", f"ban {self.player}"),
+            ("传送到世界出生点", "Accent",
              f"execute in minecraft:overworld run tp {self.player} 0 100 0"),
         ]
         for label, obj, cmd in actions:

@@ -143,6 +143,15 @@ class AppState(QObject):
         self.config_data = dict(self.current_server["config"])
         self.server_path = Path(self.config_data.get("server_path", "."))
 
+        # 应用保存的主题
+        try:
+            from ui_qt.theme import theme
+            saved_theme = self.config_data.get("theme", "")
+            if saved_theme:
+                theme.set(saved_theme)
+        except Exception:
+            pass
+
         self.data_dir = registry.get_data_dir(self.server_id)
         set_perm_dir(self.data_dir)
         set_zones_dir(self.data_dir)

@@ -112,11 +112,6 @@ class PlayersPage(BasePage):
         rl.setContentsMargins(16, 10, 16, 10)
         rl.setSpacing(10)
 
-        icon = QLabel("🎮")
-        icon.setStyleSheet(
-            f"color: {theme.c('accent')}; font-size: 18px;")
-        rl.addWidget(icon)
-
         name_lbl = QLabel(name)
         name_lbl.setStyleSheet(
             f"color: {theme.c('text')}; "

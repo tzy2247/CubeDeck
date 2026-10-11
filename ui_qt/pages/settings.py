@@ -454,25 +454,32 @@ class SettingsPage(BasePage):
         cfg["theme"] = self.theme_combo.currentText()
         cfg["modrinth_proxy"] = self.e_proxy.text().strip()
         cfg["modrinth_api_base"] = self.e_modrinth_api.text().strip()
-        cfg["curseforge_api_base"] = self.e_cf_api_base.text().strip()  # ★
         cfg["curseforge_api_key"] = self.e_cf_key.text().strip()
 
-        if self.state.save_config():
-            self.state.server_path = Path(cfg["server_path"])
-            self.state.log("配置已保存", "ok")
+        if not self.state.save_config():
+            QMessageBox.critical(self, "保存失败", "无法写入配置文件")
+            return
 
-            # 主题即时生效
-            from ui_qt.theme import theme as _t
-            if _t.set(cfg["theme"]):
-                from PySide6.QtWidgets import QApplication
-                QApplication.instance().setStyleSheet(_t.qss())
-                self.state.theme_changed.emit(cfg["theme"])
+        self.state.server_path = Path(cfg["server_path"])
+        self.state.log("配置已保存", "ok")
 
-            self._status.setText("已保存")
-            self._status.setStyleSheet(
-                f"color: {theme.c('green')}; font-size: 11px; "
-                f"background: transparent;")
-            QMessageBox.information(self, "成功", "配置已保存")
+        self._status.setText("已保存")
+        self._status.setStyleSheet(
+            f"color: {theme.c('green')}; font-size: 11px; "
+            f"background: transparent;")
+
+        # ★ 第一步：先弹提示（此时 SettingsPage 还是完整的）
+        #    用 self.window() 保证弹窗居中于主窗口
+        parent = self.window() if self.window() else self
+        QMessageBox.information(parent, "成功", "配置已保存")
+
+        # ★ 第二步：弹窗关闭后，才触发主题切换
+        #    这会重建所有页面，让新主题的内联样式生效
+        from ui_qt.theme import theme as _t
+        if _t.set(cfg["theme"]):
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance().setStyleSheet(_t.qss())
+            self.state.theme_changed.emit(cfg["theme"])
 
     def on_show(self):
         self._reload()

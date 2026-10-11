@@ -60,7 +60,7 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(0)
         self._switch_to(0, animate=False)
 
-        # ★ 新手引导：无服务器时弹出
+        # 无服务器时弹出引导
         if not self.state.has_server():
             QTimer.singleShot(300, self._show_onboarding)
 
@@ -76,7 +76,6 @@ class MainWindow(QMainWindow):
         s.theme_changed.connect(self._on_theme_changed)
         s.eula_required.connect(self._on_eula_required)
         s.port_conflict.connect(self._on_port_conflict)
-        # ★ 切换完成后由 server_switched 统一刷新 UI
         s.server_switched.connect(self._on_server_switched)
 
     # ========================================================
@@ -106,16 +105,13 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(24, 24, 24, 22)
         ll.setSpacing(2)
 
+        # ★ 不再写内联样式，用 objectName 交给 QSS 处理
         t1 = QLabel("CubeDeck")
-        t1.setStyleSheet(
-            f"color: {theme.c('text')}; "
-            f"font-size: 18px; font-weight: bold; letter-spacing: 0.5px;")
+        t1.setObjectName("LogoTitle")
         ll.addWidget(t1)
 
         t2 = QLabel("Minecraft 服务器控制台")
-        t2.setStyleSheet(
-            f"color: {theme.c('text_faint')}; "
-            f"font-size: 11px; letter-spacing: 0.3px;")
+        t2.setObjectName("LogoSub")
         ll.addWidget(t2)
 
         sl.addWidget(logo)
@@ -268,14 +264,9 @@ class MainWindow(QMainWindow):
     #  服务器切换
     # ========================================================
     def _on_server_switch(self, server_id):
-        """
-        侧边栏选择器触发的切换请求。
-        只负责发起请求；切换完成后的 UI 刷新由 _on_server_switched 处理。
-        """
         before_id = self.state.server_id
         self.state.request_switch_server(server_id)
 
-        # 切换被取消（用户拒绝 或 同 ID）
         if self.state.server_id == before_id:
             if hasattr(self, "_server_selector"):
                 try:
@@ -284,16 +275,12 @@ class MainWindow(QMainWindow):
                     pass
 
     def _on_server_switched(self, server_id):
-        """AppState.server_switched 信号处理：切换完成后刷新所有 UI。"""
-
-        # 1. 侧边栏选择器同步
         if hasattr(self, "_server_selector"):
             try:
                 self._server_selector.reload()
             except Exception:
                 pass
 
-        # 2. 所有页面重新加载数据
         for p in self._pages:
             if hasattr(p, "on_show"):
                 try:
@@ -302,10 +289,8 @@ class MainWindow(QMainWindow):
                     self.state.log(
                         f"[UI] {type(p).__name__} 刷新失败：{e}", "warn")
 
-        # 3. 复位页头状态
         self._refresh_status_chip("text_dim", "离线")
 
-        # 4. 复位 RCON 状态
         self._rcon_dot.setStyleSheet(
             f"color: {theme.c('text_faint')}; font-size: 10px; "
             f"background: transparent;")
@@ -374,35 +359,102 @@ class MainWindow(QMainWindow):
 
     # ========================================================
     def _on_theme_changed(self, name):
+        # 1. 刷新全局 QSS
         self.setStyleSheet(theme.qss())
 
+        # 2. 重建所有页面（让内联样式也应用新主题）
+        self._reload_all_pages()
+
+        # 3. 更新主窗口内的内联样式控件
         self._page_title.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 22px; font-weight: bold; background: transparent;")
+
         if self.state.is_running:
             self._refresh_status_chip("green", "运行中")
         else:
             self._refresh_status_chip("text_dim", "离线")
 
+        if self._rcon_label.text() == "RCON 已连接":
+            self._rcon_dot.setStyleSheet(
+                f"color: {theme.c('green')}; font-size: 10px; "
+                f"background: transparent;")
+            self._rcon_label.setStyleSheet(
+                f"color: {theme.c('green')}; font-size: 11px; "
+                f"background: transparent;")
+        else:
+            self._rcon_dot.setStyleSheet(
+                f"color: {theme.c('text_faint')}; font-size: 10px; "
+                f"background: transparent;")
+            self._rcon_label.setStyleSheet(
+                f"color: {theme.c('text_faint')}; font-size: 11px; "
+                f"background: transparent;")
+
+    def _reload_all_pages(self):
+        """
+        销毁并重建所有页面。
+        主题切换时调用，让所有内联样式用新主题重新生成。
+        """
+        # 记住当前页
+        current_idx = self._stack.currentIndex()
+
+        # 从栈里移除旧页面 + 标记删除
         for p in self._pages:
-            fn = getattr(p, "on_theme_changed", None) or getattr(
-                p, "on_show", None)
-            if fn:
+            try:
+                self._stack.removeWidget(p)
+            except Exception:
+                pass
+            try:
+                p.setParent(None)
+                p.deleteLater()
+            except Exception:
+                pass
+
+        self._pages = []
+
+        # 重新创建
+        try:
+            self._pages = [
+                DashboardPage(self.state),
+                ConsolePage(self.state),
+                PlayersPage(self.state),
+                PermissionsPage(self.state),
+                ZonesPage(self.state),
+                RosterPage(self.state),
+                BackupPage(self.state),
+                PropertiesPage(self.state),
+                AIPage(self.state),
+                PluginStorePage(self.state),
+                SettingsPage(self.state),
+            ]
+        except Exception as e:
+            self.state.log(f"[UI] 重建页面失败：{e}", "error")
+            return
+
+        for p in self._pages:
+            self._stack.addWidget(p)
+
+        # 恢复当前页
+        if 0 <= current_idx < len(self._pages):
+            self._stack.setCurrentIndex(current_idx)
+            page = self._pages[current_idx]
+            if hasattr(page, "on_show"):
                 try:
-                    fn()
+                    page.on_show()
                 except Exception:
                     pass
+        else:
+            self._stack.setCurrentIndex(0)
+            self._page_title.setText(NAV_ITEMS[0])
 
     # ========================================================
     #  新手引导
     # ========================================================
     def _show_onboarding(self):
-        """无服务器时弹出引导。所有后续动作在 exec() 返回后执行。"""
         dlg = OnboardingDialog(self)
         accepted = dlg.exec() == QDialog.Accepted
         action, name, path = dlg.get_result()
 
-        # 明确释放 dialog
         try:
             dlg.setParent(None)
             dlg.deleteLater()
@@ -418,7 +470,6 @@ class MainWindow(QMainWindow):
             self._do_import_server(name, path)
 
     def _goto_server_setup(self):
-        """切到设置页并自动打开下载对话框。"""
         settings_idx = NAV_ITEMS.index("设置")
         self._nav.setCurrentRow(settings_idx)
 
@@ -450,7 +501,6 @@ class MainWindow(QMainWindow):
             f"可以在「设置」中调整 Java 路径和内存配置。")
 
     def _goto_settings_for_java(self):
-        """跳到设置页并聚焦到 Java 路径输入框。"""
         try:
             settings_idx = NAV_ITEMS.index("设置")
         except ValueError:
@@ -459,14 +509,12 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(settings_idx)
 
         page = self._pages[settings_idx]
-        # 刷新设置页的输入框
         try:
             if hasattr(page, "_reload"):
                 page._reload()
         except Exception:
             pass
 
-        # 聚焦 Java 路径输入框
         try:
             if hasattr(page, "e_java"):
                 page.e_java.setFocus()
@@ -475,10 +523,9 @@ class MainWindow(QMainWindow):
             pass
 
     # ========================================================
-    #  EULA 处理
+    #  EULA / 端口冲突
     # ========================================================
     def _on_eula_required(self):
-        """用户尝试启动服务器但未同意 EULA。"""
         reply = QMessageBox.question(
             self, "Minecraft EULA",
             "启动服务器需要先同意 Minecraft 最终用户许可协议 (EULA)。\n\n"
@@ -506,9 +553,6 @@ class MainWindow(QMainWindow):
 
         self.state.start_server()
 
-    # ========================================================
-    #  端口冲突处理
-    # ========================================================
     def _on_port_conflict(self, port, who):
         box = QMessageBox(self)
         box.setWindowTitle("端口冲突")

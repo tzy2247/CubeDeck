@@ -76,6 +76,8 @@ class MainWindow(QMainWindow):
         s.theme_changed.connect(self._on_theme_changed)
         s.eula_required.connect(self._on_eula_required)
         s.port_conflict.connect(self._on_port_conflict)
+        # ★ 切换完成后由 server_switched 统一刷新 UI
+        s.server_switched.connect(self._on_server_switched)
 
     # ========================================================
     def _build(self):
@@ -263,14 +265,35 @@ class MainWindow(QMainWindow):
             pass
 
     # ========================================================
+    #  服务器切换
+    # ========================================================
     def _on_server_switch(self, server_id):
+        """
+        侧边栏选择器触发的切换请求。
+        只负责发起请求；切换完成后的 UI 刷新由 _on_server_switched 处理。
+        """
         before_id = self.state.server_id
         self.state.request_switch_server(server_id)
 
+        # 切换被取消（用户拒绝 或 同 ID）
         if self.state.server_id == before_id:
-            self._server_selector.reload()
-            return
+            if hasattr(self, "_server_selector"):
+                try:
+                    self._server_selector.reload()
+                except Exception:
+                    pass
 
+    def _on_server_switched(self, server_id):
+        """AppState.server_switched 信号处理：切换完成后刷新所有 UI。"""
+
+        # 1. 侧边栏选择器同步
+        if hasattr(self, "_server_selector"):
+            try:
+                self._server_selector.reload()
+            except Exception:
+                pass
+
+        # 2. 所有页面重新加载数据
         for p in self._pages:
             if hasattr(p, "on_show"):
                 try:
@@ -279,18 +302,17 @@ class MainWindow(QMainWindow):
                     self.state.log(
                         f"[UI] {type(p).__name__} 刷新失败：{e}", "warn")
 
-        self._header_status.setText("●  离线")
-        self._header_status.setStyleSheet(
-            f"color: {theme.c('text_dim')}; "
-            f"background-color: {theme.c('card')}; "
-            f"border: 1px solid {theme.c('border')}; "
-            f"border-radius: 12px; "
-            f"padding: 4px 14px; font-size: 12px;")
+        # 3. 复位页头状态
+        self._refresh_status_chip("text_dim", "离线")
+
+        # 4. 复位 RCON 状态
         self._rcon_dot.setStyleSheet(
-            f"color: {theme.c('text_faint')}; font-size: 12px;")
+            f"color: {theme.c('text_faint')}; font-size: 10px; "
+            f"background: transparent;")
         self._rcon_label.setText("RCON 未连接")
         self._rcon_label.setStyleSheet(
-            f"color: {theme.c('text_faint')}; font-size: 11px;")
+            f"color: {theme.c('text_faint')}; font-size: 11px; "
+            f"background: transparent;")
 
     def _on_server_starting(self):
         self._refresh_status_chip("orange", "启动中")
@@ -426,6 +448,31 @@ class MainWindow(QMainWindow):
             f"服务器「{name}」已导入。\n\n"
             f"目录：{path}\n\n"
             f"可以在「设置」中调整 Java 路径和内存配置。")
+
+    def _goto_settings_for_java(self):
+        """跳到设置页并聚焦到 Java 路径输入框。"""
+        try:
+            settings_idx = NAV_ITEMS.index("设置")
+        except ValueError:
+            return
+
+        self._nav.setCurrentRow(settings_idx)
+
+        page = self._pages[settings_idx]
+        # 刷新设置页的输入框
+        try:
+            if hasattr(page, "_reload"):
+                page._reload()
+        except Exception:
+            pass
+
+        # 聚焦 Java 路径输入框
+        try:
+            if hasattr(page, "e_java"):
+                page.e_java.setFocus()
+                page.e_java.selectAll()
+        except Exception:
+            pass
 
     # ========================================================
     #  EULA 处理

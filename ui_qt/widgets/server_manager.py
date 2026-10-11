@@ -209,7 +209,7 @@ class ServerManagerWidget(QWidget):
         self._build()
         self.reload()
 
-        # ★ 订阅 AppState 信号，让切换 / 启停 / 改名时自动重绘
+        # 订阅 AppState 信号，让切换 / 启停 / 改名时自动重绘
         try:
             self.state.server_switched.connect(self._on_server_switched)
             self.state.server_started.connect(self._on_server_state_changed)
@@ -328,7 +328,9 @@ class ServerManagerWidget(QWidget):
         # 默认目录：当前服务器父目录下的 "new_server"
         default_dir = ""
         try:
-            default_dir = str(self.state.server_path.parent / "new_server")
+            if self.state.has_server():
+                default_dir = str(
+                    self.state.server_path.parent / "new_server")
         except Exception:
             pass
 
@@ -344,11 +346,29 @@ class ServerManagerWidget(QWidget):
             QMessageBox.warning(self, "添加失败", "无法添加服务器")
             return
 
-        QMessageBox.information(
+        # ★ 询问用户是否立即切换
+        reply = QMessageBox.question(
             self, "已创建",
             f"「{name}」已创建。\n\n"
             f"目录：{server_path or '（未配置）'}\n\n"
-            f"是否立即切换过去并配置 Java 路径？")
+            f"是否立即切换过去并配置 Java 路径？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes)
+
+        if reply == QMessageBox.Yes:
+            # 调用 AppState 的切换（会自动 emit server_switched）
+            self.state.request_switch_server(new_id)
+
+            # 通知主窗口跳到设置页并聚焦 Java 输入框
+            try:
+                main = self.window()
+                if main and hasattr(main, "_goto_settings_for_java"):
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(
+                        300, main._goto_settings_for_java)
+            except Exception:
+                pass
+
         self.reload()
         self.changed.emit()
 

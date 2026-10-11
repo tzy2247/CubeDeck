@@ -1591,8 +1591,12 @@ class AppState(QObject):
     #  多服务器切换
     # ========================================================
     def switch_server(self, server_id):
-        if not self.has_server():
-            return False
+        """
+        切换到指定服务器。
+
+        与之前不同：允许从空状态（无服务器）切换到第一个服务器。
+        切换完成后 emit server_switched，由 UI 层刷新所有页面。
+        """
         if server_id == self.server_id:
             return False
         if self._switching:
@@ -1604,16 +1608,25 @@ class AppState(QObject):
 
         self._switching = True
         try:
-            try:
-                registry.update_server(
-                    self.server_id,
-                    name=self.current_server.get("name"),
-                    config=self.config_data,
-                )
-            except Exception:
-                pass
+            had_server = self.has_server()
 
-            if self.is_running and self._server_pid:
+            # =============================================
+            #  1. 保存当前服务器配置（如果有）
+            # =============================================
+            if had_server:
+                try:
+                    registry.update_server(
+                        self.server_id,
+                        name=self.current_server.get("name"),
+                        config=self.config_data,
+                    )
+                except Exception:
+                    pass
+
+            # =============================================
+            #  2. 保存运行状态文件（如果服务器在跑）
+            # =============================================
+            if had_server and self.is_running and self._server_pid:
                 try:
                     pm.save_state({
                         "pid": self._server_pid,
@@ -1626,6 +1639,9 @@ class AppState(QObject):
                 except Exception as e:
                     self.log(f"保存状态失败：{e}", "warn")
 
+            # =============================================
+            #  3. 会话失效（让旧线程停止）
+            # =============================================
             self._session_token += 1
 
             if self.rcon_client:
@@ -1654,17 +1670,24 @@ class AppState(QObject):
             except Exception:
                 pass
 
+            # =============================================
+            #  4. 切换注册表 active
+            # =============================================
             try:
                 registry.set_active(server_id)
             except Exception:
                 pass
 
+            # =============================================
+            #  5. 应用新服务器
+            # =============================================
             self.server_id = server_id
             self.current_server = server
             self.config_data = dict(server["config"])
             self.server_path = Path(
                 self.config_data.get("server_path", "."))
 
+            # 切换数据目录
             try:
                 self.data_dir = registry.get_data_dir(server_id)
                 set_perm_dir(self.data_dir)
@@ -1675,6 +1698,7 @@ class AppState(QObject):
             except Exception:
                 pass
 
+            # 重新加载数据
             try:
                 self.perm_data = load_permissions()
                 self.perm_manager.update_data(self.perm_data)
@@ -1691,9 +1715,15 @@ class AppState(QObject):
             self._last_ai_call_time = 0.0
             self._last_ai_call_per_player = {}
 
+            # =============================================
+            #  6. 通知 UI
+            # =============================================
             self.server_stopped.emit()
             self.server_switched.emit(server_id)
 
+            # =============================================
+            #  7. 后台检测新服务器目录下是否有在跑的实例
+            # =============================================
             token = self._session_token
 
             def _detect_async():

@@ -9,6 +9,20 @@ from core.commands import all_known_commands
 # 数据目录由 app 注入
 _data_dir = Path(".")
 
+DEFAULT_PERM = {
+    "enforcement_mode": "log",
+    "check_window_seconds": 300,
+    "violations_to_kick": 3,
+    "violations_to_ban": 10,
+    "players": {},
+    "known_players": [],       # ★ 所有见过的玩家（含违规者）
+    "groups": {},
+    "player_groups": {},
+    "forbidden": ["stop", "op", "deop", "ban", "ban-ip",
+                  "whitelist", "save-all", "save-off", "save-on", "reload"],
+    "whitelist_players": [],
+}
+
 
 def set_data_dir(d):
     global _data_dir
@@ -69,6 +83,20 @@ class PermissionManager:
         self.action = action or (lambda m, t="info": None)
         self._violations = {}     # {name: [(ts, cmd, raw), ...]}
 
+    def _mark_known(self, player: str):
+        """记录见过的玩家（供 UI 显示）。"""
+        if not player:
+            return
+        try:
+            known = self.data.setdefault("known_players", [])
+            if player not in known:
+                known.append(player)
+                # 只在首次见到该玩家时保存
+                save_permissions(self.data)
+                self.log(f"新玩家加入审计列表：{player}", "info")
+        except Exception:
+            pass
+
     # ---------- 外部更新 ----------
     def update_data(self, data):
         self.data = data
@@ -89,6 +117,8 @@ class PermissionManager:
 
     def check(self, player: str, cmd_name: str):
         """返回 (ok, reason)。"""
+
+        self._mark_known(player)  # ★ 新增
         if self.is_whitelisted(player):
             return True, "白名单玩家"
 
@@ -106,6 +136,7 @@ class PermissionManager:
 
     # ---------- 违规处理 ----------
     def on_violation(self, player: str, cmd_name: str, raw_cmd: str):
+        self._mark_known(player)
         now = time.time()
         window = self.data.get("check_window_seconds", 300)
         history = self._violations.setdefault(player, [])

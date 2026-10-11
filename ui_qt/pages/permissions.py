@@ -224,50 +224,65 @@ class PermissionsPage(BasePage):
     #  玩家列表（异步加载 RCON）
     # ========================================================
     def _load_players(self):
-        """先显示本地已授权的玩家，RCON 列表在后台获取。"""
+        """显示所有已知玩家 + 已授权玩家 + 白名单 + RCON 在线玩家。"""
         self._player_list.clear()
+        shown = set()
 
-        # 1. 立即显示本地缓存的玩家
-        local_names = set(self.state.perm_data.get("players", {}).keys())
-        for name in sorted(local_names):
-            self._add_player_item(name)
+        # 1. 已知玩家（所有执行过命令的，包括违规者）
+        for name in self.state.perm_data.get("known_players", []):
+            if name not in shown:
+                self._add_player_item(name)
+                shown.add(name)
 
-        # 2. 后台拉取在线玩家
+        # 2. 已授权的玩家
+        for name in self.state.perm_data.get("players", {}).keys():
+            if name not in shown:
+                self._add_player_item(name)
+                shown.add(name)
+
+        # 3. 白名单玩家
+        for name in self.state.perm_data.get("whitelist_players", []):
+            if name not in shown:
+                self._add_player_item(name)
+                shown.add(name)
+
+        # 4. ★ 同步获取 RCON 在线玩家（list 命令响应很快）
         if (self.state.rcon_client
                 and self.state.rcon_client.connected):
-            self._fetch_online_players_async()
-
-    def _fetch_online_players_async(self):
-        def worker():
             try:
                 resp = self.state.rcon_client.command("list") or ""
-                names = []
-                if ":" in resp:
-                    tail = resp.split(":", 1)[1].strip()
-                    if tail:
-                        for n in tail.split(","):
-                            n = n.strip()
-                            if n:
-                                names.append(n)
-            except Exception:
-                names = []
+                online_names = self._parse_list_response(resp)
+                for name in online_names:
+                    if name not in shown:
+                        self._add_player_item(name)
+                        shown.add(name)
 
-            # 回主线程合并
-            QTimer.singleShot(0, lambda: self._merge_online_players(names))
+                if online_names:
+                    self.state.log(
+                        f"RCON 返回在线玩家：{online_names}", "info")
+            except Exception as e:
+                self.state.log(f"获取在线玩家失败：{e}", "warn")
 
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
+    @staticmethod
+    def _parse_list_response(resp: str):
+        """从 RCON 'list' 响应里解析玩家名。"""
+        import re as _re
+        # 去掉颜色代码 §x
+        clean = _re.sub(r"§.", "", resp)
 
-    def _merge_online_players(self, online_names):
-        """把 RCON 返回的玩家合并到现有列表（不重复）。"""
-        existing = set()
-        for i in range(self._player_list.count()):
-            item = self._player_list.item(i)
-            existing.add(item.data(Qt.UserRole))
+        # 标准格式：There are N of a max of M players online: a, b, c
+        if ":" not in clean:
+            return []
+        tail = clean.split(":", 1)[1].strip()
+        if not tail:
+            return []
 
-        for name in sorted(online_names):
-            if name not in existing:
-                self._add_player_item(name)
+        names = []
+        for n in tail.split(","):
+            n = n.strip()
+            if n:
+                names.append(n)
+        return names
 
     def _add_player_item(self, name):
         item = QListWidgetItem(name)

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui_qt.theme import theme
+from core.item_names import get_item_name, is_loaded as _lang_loaded
 
 
 # 槽位列表（0-8 快捷栏 / 9-35 背包 / 36-39 装备 / 40 副手）
@@ -228,20 +229,61 @@ class PlayerDetailDialog(QDialog):
 
     def _finish_inventory(self):
         self._slot_items = dict(self._inv_merged)
+
+        # 检查语言文件是否加载
+        lang_ready = False
+        try:
+            lang_ready = _lang_loaded()
+        except Exception:
+            lang_ready = False
+
         for slot_name, lbl in self._slot_labels.items():
             entry = self._slot_items.get(slot_name)
-            if entry:
-                iid, cnt = entry
-                short = iid.replace("minecraft:", "")
-                lbl.setText(f"{short}   ×{cnt}")
-                lbl.setStyleSheet(
-                    f"color: {theme.c('text')}; font-size: 13px;")
-            else:
+            if not entry:
                 lbl.setText("— 空 —")
                 lbl.setStyleSheet(
                     f"color: {theme.c('text_faint')}; font-size: 13px;")
-        self._inv_status.setText(
-            f"✔ 已读取 {len(self._slot_items)} 个物品")
+                continue
+
+            iid, cnt = entry
+            short_id = iid.replace("minecraft:", "")
+
+            # ★ 尝试翻译
+            translated = ""
+            if lang_ready:
+                try:
+                    translated = get_item_name(iid)
+                except Exception:
+                    translated = ""
+
+            # 判断是否翻译成功（返回的不是原始 ID）
+            has_translation = (
+                    translated
+                    and translated != iid
+                    and translated != short_id
+                    and translated != iid.split(":", 1)[-1]
+                    and not translated.startswith("item.")
+                    and not translated.startswith("block.")
+            )
+
+            if has_translation:
+                # 有翻译 → 显示 中文名 (short_id) ×count
+                text = f"{translated}  ({short_id})   ×{cnt}"
+            else:
+                # 无翻译 → 显示原始 ID
+                text = f"{short_id}   ×{cnt}"
+
+            lbl.setText(text)
+            lbl.setStyleSheet(
+                f"color: {theme.c('text')}; font-size: 13px;")
+            # 鼠标悬停时显示完整 ID（方便排查模组物品）
+            lbl.setToolTip(iid)
+
+        # 状态栏：加语言文件提示
+        status = f"✔ 已读取 {len(self._slot_items)} 个物品"
+        if not lang_ready:
+            status += "  ·  ⚠ 未加载语言文件，仅显示原始 ID"
+        self._inv_status.setText(status)
 
     @staticmethod
     def _parse_inventory(resp):

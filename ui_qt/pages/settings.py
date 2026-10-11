@@ -258,6 +258,34 @@ class SettingsPage(BasePage):
 
         bl.addWidget(c7)
 
+        # ====================================================
+        #  语言文件导出
+        # ====================================================
+        c_lang = Card(title="语言文件导出")
+        b_lang = c_lang.body()
+
+        lang_hint = QLabel(
+            "从整合包的 mods 目录批量提取模组语言文件。\n"
+            "优先提取中文（zh_cn.json）；无汉化的模组导出英语作为翻译模板。\n"
+            "常用于整合包汉化制作与维护。")
+        lang_hint.setStyleSheet(
+            f"color: {theme.c('text_faint')}; font-size: 11px; "
+            f"background: transparent;")
+        lang_hint.setWordWrap(True)
+        b_lang.addWidget(lang_hint)
+
+        lang_row = QHBoxLayout()
+        lang_row.setSpacing(10)
+
+        lang_btn = QPushButton("打开语言文件导出工具")
+        lang_btn.setObjectName("Ghost")
+        lang_btn.setFixedHeight(36)
+        lang_btn.clicked.connect(self._open_lang_exporter)
+        lang_row.addWidget(lang_btn, 1)
+        b_lang.addLayout(lang_row)
+
+        bl.addWidget(c_lang)
+
         bl.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
@@ -438,6 +466,17 @@ class SettingsPage(BasePage):
             QMessageBox.critical(self, "参数错误", "数字字段格式错误")
             return
 
+        try:
+            from core.item_search import rebuild_index
+            from core import item_names
+            item_names.set_lang_sources(
+                file_path=cfg.get("lang_file_path", ""),
+                dir_path=cfg.get("lang_dir_path", ""),
+            )
+            rebuild_index()
+        except Exception as e:
+            self.state.log(f"重建物品索引失败：{e}", "warn")
+
         cfg["server_path"] = self.e_server.text().strip()
         cfg["java_path"] = self.e_java.text().strip()
         cfg["memory_xmx"] = self.e_xmx.text().strip() or "4G"
@@ -562,3 +601,8 @@ class SettingsPage(BasePage):
             pass
         # 重新加载本页
         self._reload()
+
+    def _open_lang_exporter(self):
+        from ui_qt.dialogs.lang_exporter import LangExporterDialog
+        dlg = LangExporterDialog(self.state, self)
+        dlg.exec()

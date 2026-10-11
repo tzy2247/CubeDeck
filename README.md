@@ -2,7 +2,7 @@
 
 现代化 Minecraft 服务器控制台，基于 Python + PySide6。
 
-一套软件管理多台服务器，集成进程控制、RCON 控制台、玩家管理、备份恢复、AI 助手等功能。
+一套软件管理多个服务器，集成进程控制、RCON 控制台、玩家管理、备份恢复、AI 助手等功能。
 
 ---
 
@@ -20,6 +20,7 @@
 
 **支持服务端**：Vanilla / Paper / Purpur / Spigot / Forge / NeoForge / Fabric  
 **版本要求**：Minecraft 1.16.5+
+
 ***你可以下载更低版本的Minecraft，但CubeDeck中的部分功能可能不可用。。。***
 
 ---

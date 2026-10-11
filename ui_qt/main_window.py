@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt, QSize, QEasingCurve, QPropertyAnimation, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QMessageBox,
+    QDialog,
 )
 
 from ui_qt.theme import theme
@@ -20,6 +21,9 @@ from ui_qt.pages.properties import PropertiesPage
 from ui_qt.pages.ai import AIPage
 from ui_qt.pages.settings import SettingsPage
 from ui_qt.pages.plugin_store import PluginStorePage
+
+# 新手引导
+from ui_qt.dialogs.onboarding import OnboardingDialog
 
 NAV_ITEMS = [
     "仪表盘",
@@ -56,6 +60,10 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(0)
         self._switch_to(0, animate=False)
 
+        # ★ 新手引导：无服务器时弹出
+        if not self.state.has_server():
+            QTimer.singleShot(300, self._show_onboarding)
+
     # ========================================================
     def _connect_signals(self):
         s = self.state
@@ -66,6 +74,8 @@ class MainWindow(QMainWindow):
         s.rcon_connected.connect(self._on_rcon_connected)
         s.rcon_disconnected.connect(self._on_rcon_disconnected)
         s.theme_changed.connect(self._on_theme_changed)
+        s.eula_required.connect(self._on_eula_required)
+        s.port_conflict.connect(self._on_port_conflict)
 
     # ========================================================
     def _build(self):
@@ -89,7 +99,6 @@ class MainWindow(QMainWindow):
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(0)
 
-        # ---- Logo ----
         logo = QWidget()
         ll = QVBoxLayout(logo)
         ll.setContentsMargins(24, 24, 24, 22)
@@ -108,7 +117,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(t2)
 
         sl.addWidget(logo)
-        # ★ 服务器切换器
+
         from ui_qt.widgets.server_selector import ServerSelector
 
         selector_wrap = QWidget()
@@ -122,7 +131,6 @@ class MainWindow(QMainWindow):
 
         sl.addWidget(selector_wrap)
 
-        # ---- 导航 ----
         self._nav = QListWidget()
         self._nav.setObjectName("NavList")
         self._nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -137,7 +145,6 @@ class MainWindow(QMainWindow):
         self._nav.currentRowChanged.connect(self._on_nav_changed)
         sl.addWidget(self._nav, 1)
 
-        # ---- 底部状态 ----
         footer = QWidget()
         fl = QHBoxLayout(footer)
         fl.setContentsMargins(28, 12, 24, 22)
@@ -167,7 +174,6 @@ class MainWindow(QMainWindow):
         ml.setContentsMargins(28, 24, 28, 24)
         ml.setSpacing(16)
 
-        # ---- 页头 ----
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(12)
@@ -187,7 +193,6 @@ class MainWindow(QMainWindow):
 
         ml.addLayout(header)
 
-        # ---- 页面栈 ----
         self._stack = QStackedWidget()
         ml.addWidget(self._stack, 1)
 
@@ -242,7 +247,6 @@ class MainWindow(QMainWindow):
             self._animate_title()
 
     def _animate_page_in(self, widget):
-        """页面淡入 + 从右侧滑入。"""
         from ui_qt.widgets.animations import appear
         try:
             appear(widget, direction="right", distance=24,
@@ -251,7 +255,6 @@ class MainWindow(QMainWindow):
             pass
 
     def _animate_title(self):
-        """页头标题轻微滑入。"""
         from ui_qt.widgets.animations import appear
         try:
             appear(self._page_title, direction="down",
@@ -261,7 +264,6 @@ class MainWindow(QMainWindow):
 
     # ========================================================
     def _on_server_switch(self, server_id):
-        """侧边栏切换服务器。"""
         before_id = self.state.server_id
         self.state.request_switch_server(server_id)
 
@@ -269,7 +271,6 @@ class MainWindow(QMainWindow):
             self._server_selector.reload()
             return
 
-        # 刷新所有页面
         for p in self._pages:
             if hasattr(p, "on_show"):
                 try:
@@ -278,7 +279,6 @@ class MainWindow(QMainWindow):
                     self.state.log(
                         f"[UI] {type(p).__name__} 刷新失败：{e}", "warn")
 
-        # 复位页头状态（内联样式）
         self._header_status.setText("●  离线")
         self._header_status.setStyleSheet(
             f"color: {theme.c('text_dim')}; "
@@ -354,7 +354,6 @@ class MainWindow(QMainWindow):
     def _on_theme_changed(self, name):
         self.setStyleSheet(theme.qss())
 
-        # 主窗口自有元素需重刷
         self._page_title.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 22px; font-weight: bold; background: transparent;")
@@ -364,12 +363,131 @@ class MainWindow(QMainWindow):
             self._refresh_status_chip("text_dim", "离线")
 
         for p in self._pages:
-            fn = getattr(p, "on_theme_changed", None) or getattr(p, "on_show", None)
+            fn = getattr(p, "on_theme_changed", None) or getattr(
+                p, "on_show", None)
             if fn:
                 try:
                     fn()
                 except Exception:
                     pass
+
+    # ========================================================
+    #  新手引导
+    # ========================================================
+    def _show_onboarding(self):
+        """无服务器时弹出引导。所有后续动作在 exec() 返回后执行。"""
+        dlg = OnboardingDialog(self)
+        accepted = dlg.exec() == QDialog.Accepted
+        action, name, path = dlg.get_result()
+
+        # 明确释放 dialog
+        try:
+            dlg.setParent(None)
+            dlg.deleteLater()
+        except Exception:
+            pass
+
+        if not accepted:
+            return
+
+        if action == "download":
+            QTimer.singleShot(300, self._goto_server_setup)
+        elif action == "import":
+            self._do_import_server(name, path)
+
+    def _goto_server_setup(self):
+        """切到设置页并自动打开下载对话框。"""
+        settings_idx = NAV_ITEMS.index("设置")
+        self._nav.setCurrentRow(settings_idx)
+
+        page = self._pages[settings_idx]
+        QTimer.singleShot(500, page._open_server_setup)
+
+    def _do_import_server(self, name, path):
+        ok = self.state.activate_server(name, path)
+        if not ok:
+            QMessageBox.warning(
+                self, "导入失败",
+                "服务器导入失败，请检查目录或重试。")
+            return
+
+        for p in self._pages:
+            if hasattr(p, "on_show"):
+                try:
+                    p.on_show()
+                except Exception:
+                    pass
+
+        if hasattr(self, "_server_selector"):
+            self._server_selector.reload()
+
+        QMessageBox.information(
+            self, "导入成功",
+            f"服务器「{name}」已导入。\n\n"
+            f"目录：{path}\n\n"
+            f"可以在「设置」中调整 Java 路径和内存配置。")
+
+    # ========================================================
+    #  EULA 处理
+    # ========================================================
+    def _on_eula_required(self):
+        """用户尝试启动服务器但未同意 EULA。"""
+        reply = QMessageBox.question(
+            self, "Minecraft EULA",
+            "启动服务器需要先同意 Minecraft 最终用户许可协议 (EULA)。\n\n"
+            "协议全文：https://aka.ms/MinecraftEULA\n\n"
+            "是否同意并继续启动？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            eula_path = self.state.server_path / "eula.txt"
+            eula_path.write_text(
+                "# By changing the setting below to TRUE you are "
+                "indicating your agreement to our EULA\n"
+                "# (https://aka.ms/MinecraftEULA).\n"
+                "eula=true\n",
+                encoding="utf-8",
+            )
+            self.state.log("已同意 EULA，正在启动…", "ok")
+        except Exception as e:
+            QMessageBox.critical(self, "写入 eula.txt 失败", str(e))
+            return
+
+        self.state.start_server()
+
+    # ========================================================
+    #  端口冲突处理
+    # ========================================================
+    def _on_port_conflict(self, port, who):
+        box = QMessageBox(self)
+        box.setWindowTitle("端口冲突")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"端口 {port} 已被占用")
+        box.setInformativeText(
+            f"占用者：{who}\n\n"
+            f"你可以选择：\n"
+            f"· 换用其他端口 —— 自动修改 server.properties 中的 server-port\n"
+            f"· 清理占用进程 —— 终止占用该端口的进程（适合残留的僵尸进程）\n"
+            f"· 取消 —— 不做任何操作")
+
+        switch_btn = box.addButton("换用其他端口", QMessageBox.AcceptRole)
+        kill_btn = box.addButton("清理占用进程", QMessageBox.DestructiveRole)
+        cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(switch_btn)
+
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is switch_btn:
+            self.state.resolve_port_conflict("switch")
+        elif clicked is kill_btn:
+            self.state.resolve_port_conflict("kill")
+        else:
+            self.state.resolve_port_conflict("cancel")
 
     # ========================================================
     def closeEvent(self, event):

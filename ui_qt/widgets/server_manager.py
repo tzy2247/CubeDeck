@@ -376,9 +376,6 @@ class ServerManagerWidget(QWidget):
 
     def _delete(self, server_id):
         servers = registry.list_servers()
-        if len(servers) <= 1:
-            QMessageBox.warning(self, "提示", "至少保留一个服务器")
-            return
 
         target_name = server_id
         for s in servers:
@@ -405,6 +402,15 @@ class ServerManagerWidget(QWidget):
             remaining = registry.list_servers()
             if remaining:
                 self.state.request_switch_server(remaining[0]["id"])
+            else:
+                # ★ 没有剩余服务器：让 MainWindow 重新弹引导
+                try:
+                    main = self.window()
+                    if hasattr(main, "_show_onboarding"):
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(300, main._show_onboarding)
+                except Exception:
+                    pass
 
         self.reload()
         self.changed.emit()

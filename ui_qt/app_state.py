@@ -2,6 +2,7 @@
 import json as _json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -35,6 +36,7 @@ from core.clean_zones import (
     set_data_dir as set_clean_dir,
 )
 
+
 # ============================================================
 #  异步 RCON 执行器
 # ============================================================
@@ -58,6 +60,7 @@ class RconWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+
 # ============================================================
 #  AppState
 # ============================================================
@@ -72,41 +75,21 @@ class AppState(QObject):
     rcon_disconnected = Signal()
     theme_changed = Signal(str)
     stats_updated = Signal(dict)
-    server_switched = Signal(str)      # 服务器切换完成，附带 server_id
-    backup_finished = Signal()          # 备份完成（成功或失败）
+    server_switched = Signal(str)
+    backup_finished = Signal()
+    eula_required = Signal()
+    port_conflict = Signal(int, str)
 
     def __init__(self):
         super().__init__()
 
-        # ====================================================
-        #  1. 注册表 + 当前服务器
-        # ====================================================
         paths.ensure_userdata_root()
 
         self.registry = registry.load_registry()
         self.current_server = registry.get_active()
 
-        if self.current_server is None:
-            from core.config import DEFAULT_CONFIG
-            sid = registry.add_server("默认服务器", dict(DEFAULT_CONFIG))
-            self.current_server = registry.get_server(sid)
-
-        self.server_id = self.current_server["id"]
-        self.config_data = dict(self.current_server["config"])
-        self.server_path = Path(self.config_data.get("server_path", "."))
-
         # ====================================================
-        #  2. 数据目录（必须在加载数据之前设置）
-        # ====================================================
-        self.data_dir = registry.get_data_dir(self.server_id)
-        set_perm_dir(self.data_dir)
-        set_zones_dir(self.data_dir)
-        set_clean_dir(self.data_dir)
-        set_hist_dir(self.data_dir)
-        set_pm_dir(self.data_dir)              # ★ 进程状态文件也隔离
-
-        # ====================================================
-        #  3. 运行状态
+        #  公共状态（无论有无服务器都需要）
         # ====================================================
         self.is_running = False
         self.rcon_client = None
@@ -122,13 +105,51 @@ class AppState(QObject):
         self._log_watcher = None
         self._workers = []
         self._scheduler_stop = threading.Event()
-        self._session_token = 0                # ★ 切换时自增，让旧线程失效
-        self._switching = False                # ★ 切换中标志
+        self._session_token = 0
+        self._switching = False
+        self._port_conflict_handling = False
+        self._stdout_file = None
+        self.process = None
+        self._last_ai_call_time = 0.0
+        self._last_ai_call_per_player = {}
+        self.server_info = ServerInfo()
 
         # ====================================================
-        #  4. core 模块
+        #  无服务器：进入空状态
         # ====================================================
-        self.server_info = ServerInfo()
+        if self.current_server is None:
+            from core.config import DEFAULT_CONFIG
+            self.server_id = ""
+            self.config_data = dict(DEFAULT_CONFIG)
+            self.server_path = Path(".")
+            self.data_dir = paths.USERDATA_ROOT
+            self.perm_data = {}
+            self.perm_manager = PermissionManager(
+                self.perm_data,
+                server_version=self.server_info.version,
+                log=self.log,
+                action=lambda *a, **kw: None,
+            )
+            self.zones_data = {"zones": []}
+            self.clean_zones_data = {"zones": []}
+            self.ai_history = AIHistory()
+            self.server_context = ServerContextProvider(self)
+            return
+
+        # ====================================================
+        #  有服务器：完整初始化
+        # ====================================================
+        self.server_id = self.current_server["id"]
+        self.config_data = dict(self.current_server["config"])
+        self.server_path = Path(self.config_data.get("server_path", "."))
+
+        self.data_dir = registry.get_data_dir(self.server_id)
+        set_perm_dir(self.data_dir)
+        set_zones_dir(self.data_dir)
+        set_clean_dir(self.data_dir)
+        set_hist_dir(self.data_dir)
+        set_pm_dir(self.data_dir)
+
         self.perm_data = load_permissions()
         self.perm_manager = PermissionManager(
             self.perm_data,
@@ -141,13 +162,6 @@ class AppState(QObject):
         self.ai_history = AIHistory()
         self.server_context = ServerContextProvider(self)
 
-        # AI 冷却
-        self._last_ai_call_time = 0.0
-        self._last_ai_call_per_player = {}
-
-        # ====================================================
-        #  5. 后台线程
-        # ====================================================
         threading.Thread(target=self._status_loop, daemon=True).start()
         threading.Thread(target=self._scheduler_loop, daemon=True).start()
         threading.Thread(target=self._detect_running_server,
@@ -158,6 +172,61 @@ class AppState(QObject):
     # ========================================================
     def log(self, message, tag="info"):
         self.log_message.emit(str(message), tag)
+
+    # ========================================================
+    #  服务器状态
+    # ========================================================
+    def has_server(self) -> bool:
+        return bool(self.server_id)
+
+    def activate_server(self, name: str, server_path) -> bool:
+        """从空状态创建并激活一个服务器。"""
+        if self.has_server():
+            return False
+
+        from core.config import DEFAULT_CONFIG
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["server_path"] = str(server_path)
+
+        sid = registry.add_server(name, cfg)
+        registry.set_active(sid)
+
+        server = registry.get_server(sid)
+        if server is None:
+            return False
+
+        self.server_id = sid
+        self.current_server = server
+        self.config_data = dict(server["config"])
+        self.server_path = Path(self.config_data.get("server_path", "."))
+
+        self.data_dir = registry.get_data_dir(sid)
+        set_perm_dir(self.data_dir)
+        set_zones_dir(self.data_dir)
+        set_clean_dir(self.data_dir)
+        set_hist_dir(self.data_dir)
+        set_pm_dir(self.data_dir)
+
+        self.perm_data = load_permissions()
+        self.perm_manager = PermissionManager(
+            self.perm_data,
+            server_version=self.server_info.version,
+            log=self.log,
+            action=self._perm_action,
+        )
+        self.zones_data = load_zones()
+        self.clean_zones_data = load_clean_zones()
+        self.ai_history = AIHistory()
+        self.server_context = ServerContextProvider(self)
+
+        threading.Thread(target=self._status_loop, daemon=True).start()
+        threading.Thread(target=self._scheduler_loop, daemon=True).start()
+        threading.Thread(target=self._detect_running_server,
+                         daemon=True).start()
+
+        self.log(f"已激活服务器：{name}", "ok")
+        self.server_switched.emit(sid)
+        return True
 
     # ========================================================
     #  RCON 快捷执行
@@ -207,6 +276,9 @@ class AppState(QObject):
     #  服务器启动
     # ========================================================
     def start_server(self):
+        if not self.has_server():
+            self.log("尚未选择服务器", "warn")
+            return
         if self.is_running:
             return
         self.server_starting.emit()
@@ -239,6 +311,34 @@ class AppState(QObject):
             self._take_over(existing)
             return
 
+        # ---- 1.5. EULA 检查 ----
+        eula_path = self.server_path / "eula.txt"
+        eula_ok = False
+        if eula_path.exists():
+            try:
+                txt = eula_path.read_text(
+                    encoding="utf-8", errors="ignore")
+                normalized = txt.replace(" ", "").lower()
+                if "eula=true" in normalized:
+                    eula_ok = True
+            except Exception:
+                pass
+
+        if not eula_ok:
+            self.log("⚠ 需要先同意 Minecraft EULA 才能启动服务器", "warn")
+            try:
+                eula_path.write_text(
+                    "# By changing the setting below to TRUE you are "
+                    "indicating your agreement to our EULA\n"
+                    "# (https://aka.ms/MinecraftEULA).\n"
+                    "eula=false\n",
+                    encoding="utf-8")
+            except Exception:
+                pass
+            self.eula_required.emit()
+            self.server_stopped.emit()
+            return
+
         # ---- 2. 校验 Java ----
         java_path = Path(self.config_data.get("java_path", ""))
         if not java_path.exists():
@@ -249,6 +349,31 @@ class AppState(QObject):
         if not self.server_path.exists():
             self.log(f"服务器目录不存在：{self.server_path}", "error")
             self.server_stopped.emit()
+            return
+
+        # ---- 2.5. 端口占用检查 ----
+        mc_port = 25565
+        props = self.server_path / "server.properties"
+        if props.exists():
+            try:
+                for line in props.read_text(
+                        encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if line.startswith("server-port="):
+                        try:
+                            mc_port = int(line.split("=", 1)[1].strip())
+                        except ValueError:
+                            pass
+                        break
+            except Exception:
+                pass
+
+        port_ok, who = self._check_port_usage(mc_port)
+        if not port_ok:
+            self.log(f"⚠ 端口 {mc_port} 已被占用：{who}", "warn")
+            if not self._port_conflict_handling:
+                self._port_conflict_handling = True
+                self.port_conflict.emit(mc_port, who)
             return
 
         # ---- 3. 检测启动方式 ----
@@ -290,16 +415,30 @@ class AppState(QObject):
             cmd += ["-jar", str(target), "nogui"]
             uses_script = False
 
-        # ---- 5. 启动进程 ----
+        # ---- 5. 启动进程（stdout 重定向到文件，避免 PIPE 死锁）----
         try:
             flags = (subprocess.CREATE_NEW_PROCESS_GROUP
                      if sys.platform == "win32" else 0)
+
+            log_dir = self.server_path / "logs"
+            try:
+                log_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            stdout_log_path = log_dir / "stdout.log"
+
+            try:
+                self._stdout_file = open(
+                    stdout_log_path, "ab", buffering=0)
+            except Exception:
+                self._stdout_file = subprocess.DEVNULL
+
             self.process = subprocess.Popen(
                 cmd,
                 cwd=str(self.server_path),
                 env=env,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                stdout=self._stdout_file,
                 stderr=subprocess.STDOUT,
                 bufsize=0,
                 creationflags=flags,
@@ -385,7 +524,7 @@ class AppState(QObject):
             self.log(f"RCON 连接线程出错：{e}", "warn")
 
     def _take_over(self, existing, token=None):
-        """接管已有服务端进程。token 用于校验会话是否有效。"""
+        """接管已有服务端进程。"""
         if token is None:
             token = self._session_token
         if token != self._session_token:
@@ -428,12 +567,13 @@ class AppState(QObject):
 
     def _detect_running_server(self, token=None):
         """优先读状态文件，兜底进程扫描。"""
+        if not self.has_server():
+            return
         if token is None:
             token = self._session_token
         if token != self._session_token:
             return
 
-        # ---- 1. 状态文件 ----
         state = pm.load_state()
         pid = state.get("pid")
         create_time = state.get("create_time")
@@ -454,13 +594,11 @@ class AppState(QObject):
                 }, token=token)
                 return
 
-        # ---- 2. 状态文件失效 ----
         try:
             pm.clear_state()
         except Exception:
             pass
 
-        # ---- 3. 进程扫描 ----
         running = (pm.find_running_java_by_cwd(self.server_path)
                    or pm.find_running_server(self.server_path))
         if not running:
@@ -475,6 +613,8 @@ class AppState(QObject):
     #  服务器停止
     # ========================================================
     def stop_server(self):
+        if not self.has_server():
+            return
         if not self.is_running:
             return
         self._user_stopping = True
@@ -508,14 +648,18 @@ class AppState(QObject):
         self._on_server_exited()
 
     def _watch_process(self, token=None):
-        """
-        监控服务端存活。
-        token 用于切换服务器后自动失效，避免误触发新服务器的状态。
-        """
+        """监控服务端存活。首次检查提前到 3 秒。"""
         if token is None:
             token = self._session_token
 
-        time.sleep(5)
+        time.sleep(3)
+
+        # 首次检查：如果进程已死，直接读日志给出失败原因
+        if not pm.find_running_java_by_cwd(self.server_path):
+            if token == self._session_token:
+                self._log_start_failure()
+                self._on_server_exited(token)
+            return
 
         while self.is_running and token == self._session_token:
             running = pm.find_running_java_by_cwd(self.server_path)
@@ -537,10 +681,46 @@ class AppState(QObject):
                 self._on_server_exited(token)
             return
 
+    def _log_start_failure(self):
+        """读取日志末尾，猜测启动失败原因。"""
+        log_path = self.server_path / "logs" / "latest.log"
+        if not log_path.exists():
+            self.log(
+                "启动失败：未生成日志文件（服务端可能从未成功运行）",
+                "error")
+            return
+        try:
+            text = log_path.read_text(
+                encoding="utf-8", errors="replace")
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            tail = lines[-20:] if len(lines) > 20 else lines
+
+            self.log("━━━ 服务端启动失败，日志末尾： ━━━", "error")
+            for ln in tail:
+                self.log(f"  {ln}", "error")
+
+            joined = "\n".join(tail)
+            if ("Address already in use" in joined
+                    or "FAILED TO BIND TO PORT" in joined):
+                self.log(
+                    "  ✖ 原因：端口已被占用。可能有僵尸 Java 进程残留。",
+                    "error")
+            elif "UnsupportedClassVersionError" in joined:
+                self.log(
+                    "  ✖ 原因：Java 版本过低。MC 1.21+ 需要 Java 21+。",
+                    "error")
+            elif "Unable to access jarfile" in joined:
+                self.log("  ✖ 原因：server.jar 路径错误或文件损坏。",
+                         "error")
+            elif "Could not reserve enough space" in joined:
+                self.log("  ✖ 原因：内存参数过大，超出物理内存。",
+                         "error")
+        except Exception as e:
+            self.log(f"读取日志失败：{e}", "warn")
+
     def _on_server_exited(self, token=None):
         if token is None:
             token = self._session_token
-        # ★ 切换服务器后，旧线程的收尾请求全部作废
         if token != self._session_token:
             return
 
@@ -557,6 +737,20 @@ class AppState(QObject):
         self._server_create_time = None
         self._is_external = False
         self._user_stopping = False
+
+        # 关闭 stdout 文件句柄
+        if getattr(self, "_stdout_file", None):
+            try:
+                self._stdout_file.close()
+            except Exception:
+                pass
+            self._stdout_file = None
+
+        if getattr(self, "process", None):
+            try:
+                self.process = None
+            except Exception:
+                pass
 
         if self.rcon_client:
             try:
@@ -591,10 +785,177 @@ class AppState(QObject):
 
             def _restart():
                 time.sleep(5)
-                # ★ 重启前校验 token，避免切换后误重启
                 if not self.is_running and token == self._session_token:
                     self.start_server()
             threading.Thread(target=_restart, daemon=True).start()
+
+    # ========================================================
+    #  端口冲突处理
+    # ========================================================
+    def _check_port_usage(self, port: int):
+        """检查端口是否被占用。返回 (ok, 占用描述)。"""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                s.bind(("0.0.0.0", port))
+                return True, ""
+        except OSError:
+            pass
+
+        try:
+            import psutil
+            for conn in psutil.net_connections(kind="inet"):
+                if (conn.laddr
+                        and getattr(conn.laddr, "port", None) == port):
+                    pid = conn.pid
+                    if pid:
+                        try:
+                            p = psutil.Process(pid)
+                            return False, f"{p.name()} (PID {pid})"
+                        except Exception:
+                            return False, f"PID {pid}"
+            return False, "未知进程"
+        except Exception as e:
+            return False, f"未知（{e}）"
+
+    def _find_free_port(self, start=25565, end=25665):
+        """从 start 开始找到一个可用端口，找不到返回 None。"""
+        for port in range(start, end):
+            try:
+                with socket.socket(socket.AF_INET,
+                                   socket.SOCK_STREAM) as s:
+                    s.settimeout(0.3)
+                    s.bind(("0.0.0.0", port))
+                    return port
+            except OSError:
+                continue
+        return None
+
+    def _set_server_property(self, key, value):
+        """修改 server.properties 中某个字段（不存在则添加）。"""
+        props = self.server_path / "server.properties"
+        lines = []
+        if props.exists():
+            try:
+                lines = props.read_text(
+                    encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                lines = []
+
+        new_lines = []
+        found = False
+        for line in lines:
+            stripped = line.strip()
+            if (stripped.startswith(f"{key}=")
+                    and not stripped.startswith("#")):
+                new_lines.append(f"{key}={value}")
+                found = True
+            else:
+                new_lines.append(line)
+
+        if not found:
+            new_lines.append(f"{key}={value}")
+
+        try:
+            props.write_text(
+                "\n".join(new_lines) + "\n", encoding="utf-8")
+            return True
+        except Exception as e:
+            self.log(f"修改 server.properties 失败：{e}", "error")
+            return False
+
+    def _kill_port_owner(self, port):
+        """终止占用指定端口的所有进程。返回 [(pid, name), ...]。"""
+        import psutil
+        killed = []
+        try:
+            conns = psutil.net_connections(kind="inet")
+        except Exception as e:
+            self.log(f"枚举端口失败：{e}", "warn")
+            return killed
+
+        for conn in conns:
+            try:
+                if (conn.laddr
+                        and getattr(conn.laddr, "port", None) == port
+                        and conn.pid):
+                    p = psutil.Process(conn.pid)
+                    name = p.name()
+                    p.kill()
+                    killed.append((conn.pid, name))
+                    self.log(
+                        f"已终止占用进程：{name} (PID {conn.pid})", "ok")
+            except Exception as e:
+                try:
+                    self.log(
+                        f"无法终止 PID {conn.pid}：{e}", "warn")
+                except Exception:
+                    pass
+
+        return killed
+
+    def resolve_port_conflict(self, action: str):
+        """
+        用户在端口冲突对话框里做出选择。
+        action: "switch" | "kill" | "cancel"
+        """
+        self._port_conflict_handling = False
+
+        if action == "cancel":
+            self.log("已取消启动（端口冲突未解决）", "warn")
+            self.server_stopped.emit()
+            return
+
+        # 读取当前端口
+        old_port = 25565
+        props = self.server_path / "server.properties"
+        if props.exists():
+            try:
+                for line in props.read_text(
+                        encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if line.startswith("server-port="):
+                        try:
+                            old_port = int(line.split("=", 1)[1].strip())
+                        except ValueError:
+                            pass
+                        break
+            except Exception:
+                pass
+
+        if action == "switch":
+            new_port = self._find_free_port(start=old_port + 1)
+            if new_port is None:
+                new_port = self._find_free_port(start=25565, end=25665)
+
+            if new_port is None:
+                self.log("找不到可用端口，无法切换", "error")
+                self.server_stopped.emit()
+                return
+
+            if self._set_server_property("server-port", new_port):
+                self.log(
+                    f"已将 server-port 从 {old_port} 改为 {new_port}",
+                    "ok")
+            else:
+                self.server_stopped.emit()
+                return
+
+            self.start_server()
+            return
+
+        if action == "kill":
+            killed = self._kill_port_owner(old_port)
+            if not killed:
+                self.log(
+                    f"未能终止任何进程（端口 {old_port} 占用者可能无权限）",
+                    "warn")
+                self.server_stopped.emit()
+                return
+
+            time.sleep(1.0)
+            self.start_server()
+            return
 
     # ========================================================
     #  RCON 连接
@@ -960,17 +1321,38 @@ class AppState(QObject):
                 cmd = self.server_info.cmd_tps()
                 if cmd:
                     resp = client.command(cmd) or ""
-                    m = re.search(r"(\d+\.\d+)[,)]", resp)
-                    if m:
-                        stats["tps"] = float(m.group(1))
-            except Exception:
-                pass
 
-            try:
-                resp = client.command("list") or ""
-                m = re.search(r"There are (\d+) of a max of (\d+)", resp)
-                if m:
-                    stats["players"] = f"{m.group(1)} / {m.group(2)}"
+                    # ★ 优先：找冒号后面的第一个浮点数（标准 TPS 响应格式）
+                    m = re.search(
+                        r":\s*[^\d]*(\d+(?:\.\d+)?)",
+                        resp)
+                    if not m:
+                        # 兜底1：找所有浮点数里的最大值（过滤版本号等）
+                        candidates = re.findall(
+                            r"(\d+\.\d+)", resp)
+                        floats = []
+                        for c in candidates:
+                            try:
+                                v = float(c)
+                                if 0.0 <= v <= 100.0:
+                                    floats.append(v)
+                            except ValueError:
+                                pass
+                        if floats:
+                            stats["tps"] = max(floats)
+                            if "tps" not in stats:
+                                pass
+                        else:
+                            self.log(
+                                f"[调试] TPS 解析失败，原始响应："
+                                f"{resp[:200]!r}", "warn")
+                    else:
+                        try:
+                            tps_val = float(m.group(1))
+                            if 0.0 <= tps_val <= 100.0:
+                                stats["tps"] = tps_val
+                        except ValueError:
+                            pass
             except Exception:
                 pass
 
@@ -992,13 +1374,12 @@ class AppState(QObject):
                         self._last_auto_backup = time.time()
                         self.log("触发自动备份", "info")
                         self.do_backup(wait=True)
-                        # ★ 修改点：传入 backup_dir
                         rotate_backups(
                             self.server_path,
                             int(self.config_data.get(
                                 "auto_backup_keep", 10)),
                             self.log,
-                            backup_dir=self.data_dir / "backups"
+                            backup_dir=self.data_dir / "backups",
                         )
 
                 if (self.config_data.get("global_clean_enabled")
@@ -1117,11 +1498,12 @@ class AppState(QObject):
     #  备份
     # ========================================================
     def do_backup(self, wait=False):
+        if not self.has_server():
+            return
         if self._backup_running:
             self.log("已有备份正在进行", "warn")
             return
 
-        # ★ 获取当前服务器的专属备份目录
         backup_dir = self.data_dir / "backups"
 
         if wait:
@@ -1136,14 +1518,18 @@ class AppState(QObject):
         self._backup_running = True
         try:
             perform_backup(
-                self.server_path, self.rcon_client, self.log, backup_dir=backup_dir)
+                self.server_path, self.rcon_client, self.log,
+                backup_dir=backup_dir)
         finally:
             self._backup_running = False
-            self.backup_finished.emit()  # ★ 通知 UI 刷新
+            self.backup_finished.emit()
+
     # ========================================================
     #  手动清理
     # ========================================================
     def clear_drops(self):
+        if not self.has_server():
+            return
         zones = self.zones_data.get("zones", [])
         active = [z for z in zones if z.get("enabled", True)]
 
@@ -1178,6 +1564,8 @@ class AppState(QObject):
     #  配置保存
     # ========================================================
     def save_config(self):
+        if not self.has_server():
+            return False
         if registry.update_server(
                 self.server_id,
                 name=self.current_server.get("name"),
@@ -1203,14 +1591,8 @@ class AppState(QObject):
     #  多服务器切换
     # ========================================================
     def switch_server(self, server_id):
-        """
-        切换到指定服务器。
-
-        行为约定：
-        - 原服务端进程继续运行（管理器只断开连接，不停止进程）
-        - 状态文件按服务器独立保存（切回来能秒接管）
-        - session token 让旧的监控线程自动失效
-        """
+        if not self.has_server():
+            return False
         if server_id == self.server_id:
             return False
         if self._switching:
@@ -1222,9 +1604,6 @@ class AppState(QObject):
 
         self._switching = True
         try:
-            # =============================================
-            #  1. 保存当前服务器配置
-            # =============================================
             try:
                 registry.update_server(
                     self.server_id,
@@ -1234,9 +1613,6 @@ class AppState(QObject):
             except Exception:
                 pass
 
-            # =============================================
-            #  2. 原服务器在运行：保存状态文件 + 断开连接
-            # =============================================
             if self.is_running and self._server_pid:
                 try:
                     pm.save_state({
@@ -1250,7 +1626,6 @@ class AppState(QObject):
                 except Exception as e:
                     self.log(f"保存状态失败：{e}", "warn")
 
-            # ★ session token 自增 → 旧 _watch_process 线程自动失效
             self._session_token += 1
 
             if self.rcon_client:
@@ -1279,9 +1654,6 @@ class AppState(QObject):
             except Exception:
                 pass
 
-            # =============================================
-            #  3. 切换数据目录（含进程状态文件目录）
-            # =============================================
             try:
                 registry.set_active(server_id)
             except Exception:
@@ -1299,13 +1671,10 @@ class AppState(QObject):
                 set_zones_dir(self.data_dir)
                 set_clean_dir(self.data_dir)
                 set_hist_dir(self.data_dir)
-                set_pm_dir(self.data_dir)      # ★ 状态目录也切
+                set_pm_dir(self.data_dir)
             except Exception:
                 pass
 
-            # =============================================
-            #  4. 重新加载数据
-            # =============================================
             try:
                 self.perm_data = load_permissions()
                 self.perm_manager.update_data(self.perm_data)
@@ -1322,15 +1691,9 @@ class AppState(QObject):
             self._last_ai_call_time = 0.0
             self._last_ai_call_per_player = {}
 
-            # =============================================
-            #  5. 通知 UI 复位到"离线"
-            # =============================================
             self.server_stopped.emit()
             self.server_switched.emit(server_id)
 
-            # =============================================
-            #  6. 后台检测新服务器目录下是否有在跑的实例
-            # =============================================
             token = self._session_token
 
             def _detect_async():

@@ -20,6 +20,7 @@ LABEL_WIDTH = 130
 class SettingsPage(BasePage):
     def __init__(self, state, parent=None):
         super().__init__(state, parent)
+        self._setup_dlg = None
         self._build()
         self._reload()
 
@@ -102,7 +103,7 @@ class SettingsPage(BasePage):
         dl_row.setSpacing(10)
         dl_row.addWidget(self._make_label(""))
 
-        dl_btn = QPushButton("下载服务端加载器（Paper / Fabric / Forge…）")
+        dl_btn = QPushButton("下载服务端（原版/ Paper / Fabric / Forge…）")
         dl_btn.setObjectName("Ghost")
         dl_btn.setFixedHeight(36)
         dl_btn.clicked.connect(self._open_server_setup)
@@ -262,10 +263,49 @@ class SettingsPage(BasePage):
         root.addWidget(scroll, 1)
 
     def _open_server_setup(self):
+        """打开下载对话框（非阻塞，避免嵌套事件循环）。"""
+        # 先关掉已有 dialog
+        if self._setup_dlg is not None:
+            try:
+                self._setup_dlg.close()
+                self._setup_dlg.deleteLater()
+            except Exception:
+                pass
+            self._setup_dlg = None
+
+        # 延迟一帧，让 deleteLater 先被处理，再创建新的
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._create_server_setup)
+
+    def _create_server_setup(self):
         from ui_qt.dialogs.server_setup import ServerSetupDialog
-        dlg = ServerSetupDialog(self.state, self)
+        try:
+            dlg = ServerSetupDialog(self.state, self)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return
+
+        self._setup_dlg = dlg
+        dlg.finished.connect(self._on_setup_finished)
+        dlg.open()  # ★ 关键：open() 而不是 exec()
+
+    def _on_setup_finished(self, result):
+        self._setup_dlg = None
+        if result:
+            self._reload()
+
+    def _do_open_server_setup(self):
+        from ui_qt.dialogs.server_setup import ServerSetupDialog
+        try:
+            dlg = ServerSetupDialog(self.state, self)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "打开下载窗口失败", str(e))
+            return
         if dlg.exec():
-            # 刷新服务器目录输入框（用户可能装到了新目录）
             self._reload()
 
     # ========================================================

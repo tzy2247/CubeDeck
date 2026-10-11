@@ -24,8 +24,9 @@ class ServerSetupDialog(QDialog):
         super().__init__(parent)
         self.state = state
         self._installing = False
+        self._cancelled = False        # ★ 关闭/取消后置为 True
 
-        self.setWindowTitle("下载服务端加载器")
+        self.setWindowTitle("下载服务端")
         self.resize(680, 600)
         self._build()
 
@@ -33,8 +34,35 @@ class ServerSetupDialog(QDialog):
         self.install_done.connect(self._on_install_done)
         self.progress_updated.connect(self._on_progress)
 
-        # 初始加载 MC 版本
         self._load_mc_versions()
+
+    # ========================================================
+    #  ★ 生命周期管理
+    # ========================================================
+    def closeEvent(self, event):
+        """关闭时立标记取消，断开信号，避免 worker 访问已死对象。"""
+        self._cancelled = True
+        try:
+            self.versions_loaded.disconnect()
+        except Exception:
+            pass
+        try:
+            self.install_done.disconnect()
+        except Exception:
+            pass
+        try:
+            self.progress_updated.disconnect()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def reject(self):
+        self._cancelled = True
+        super().reject()
+
+    def done(self, code):
+        self._cancelled = True
+        super().done(code)
 
     # ========================================================
     def _build(self):
@@ -42,23 +70,21 @@ class ServerSetupDialog(QDialog):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(12)
 
-        # 标题
-        title = QLabel("下载服务端加载器")
+        title = QLabel("下载服务端")
         title.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 18px; font-weight: bold; background: transparent;")
         root.addWidget(title)
 
         hint = QLabel(
-            "选择加载器、MC 版本和具体构建，自动下载到目标目录并命名为 server.jar。")
+            "选择服务端类型、MC 版本和具体构建，自动下载到目标目录并命名为 server.jar。")
         hint.setStyleSheet(
             f"color: {theme.c('text_dim')}; font-size: 12px; "
             f"background: transparent;")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
-        # 加载器
-        root.addWidget(self._make_label("加载器"))
+        root.addWidget(self._make_label("服务端类型"))
         self._loader_combo = QComboBox()
         for key, name, desc in LOADERS:
             self._loader_combo.addItem(f"{name}  ·  {desc}", key)
@@ -66,7 +92,6 @@ class ServerSetupDialog(QDialog):
         self._loader_combo.currentIndexChanged.connect(self._on_loader_changed)
         root.addWidget(self._loader_combo)
 
-        # MC 版本
         root.addWidget(self._make_label("Minecraft 版本"))
         self._mc_combo = QComboBox()
         self._mc_combo.setFixedHeight(38)
@@ -74,14 +99,12 @@ class ServerSetupDialog(QDialog):
         self._mc_combo.currentIndexChanged.connect(self._on_mc_changed)
         root.addWidget(self._mc_combo)
 
-        # 加载器版本
         root.addWidget(self._make_label("加载器版本 / 构建"))
         self._build_combo = QComboBox()
         self._build_combo.setFixedHeight(38)
         self._build_combo.addItem("请先选择 MC 版本")
         root.addWidget(self._build_combo)
 
-        # 目标目录
         root.addWidget(self._make_label("安装目录"))
         dir_row = QHBoxLayout()
         dir_row.setSpacing(8)
@@ -95,10 +118,8 @@ class ServerSetupDialog(QDialog):
         browse_btn.setFixedSize(80, 38)
         browse_btn.clicked.connect(self._browse_dir)
         dir_row.addWidget(browse_btn)
-
         root.addLayout(dir_row)
 
-        # 状态
         self._status = QLabel("")
         self._status.setStyleSheet(
             f"color: {theme.c('text_dim')}; font-size: 12px; "
@@ -108,7 +129,6 @@ class ServerSetupDialog(QDialog):
         self._status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(self._status)
 
-        # 进度条
         self._progress = QProgressBar()
         self._progress.setFixedHeight(8)
         self._progress.setTextVisible(False)
@@ -122,7 +142,6 @@ class ServerSetupDialog(QDialog):
 
         root.addStretch()
 
-        # 按钮
         btns = QHBoxLayout()
         btns.addStretch()
 
@@ -157,7 +176,6 @@ class ServerSetupDialog(QDialog):
     #  加载器切换
     # ========================================================
     def _on_loader_changed(self, idx):
-        # ★ 先清空旧数据，避免残留
         self._mc_combo.blockSignals(True)
         self._mc_combo.clear()
         self._mc_combo.addItem("加载中…")
@@ -178,30 +196,30 @@ class ServerSetupDialog(QDialog):
             "modrinth_proxy", "").strip() or None
 
         def worker():
+            versions = []
+            err = ""
             try:
                 versions = list_mc_versions(loader, proxy=proxy)
+            except LoaderDownloadError as e:
+                import traceback
+                traceback.print_exc()
+                err = str(e)
+            except Exception as e:
+                err = str(e)
+
+            # ★ 关闭后不再 emit
+            if self._cancelled:
+                return
+
+            try:
                 self.versions_loaded.emit({
                     "type": "mc_versions",
                     "loader": loader,
                     "versions": versions,
-                    "error": "",
+                    "error": err,
                 })
-            except LoaderDownloadError as e:
-                import traceback
-                traceback.print_exc()
-                self.versions_loaded.emit({
-                    "type": "mc_versions",
-                    "loader": loader,
-                    "versions": [],
-                    "error": str(e),
-                })
-            except Exception as e:
-                self.versions_loaded.emit({
-                    "type": "mc_versions",
-                    "loader": loader,
-                    "versions": [],
-                    "error": str(e),
-                })
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -213,7 +231,6 @@ class ServerSetupDialog(QDialog):
         if not mc_version or mc_version in ("加载中…", "加载失败"):
             return
 
-        # ★ 清空旧构建
         self._build_combo.clear()
         self._build_combo.addItem("加载中…")
         self._load_loader_versions(mc_version)
@@ -227,34 +244,31 @@ class ServerSetupDialog(QDialog):
             "modrinth_proxy", "").strip() or None
 
         def worker():
+            versions = []
+            err = ""
             try:
                 versions = list_loader_versions(
                     loader, mc_version, proxy=proxy)
+            except LoaderDownloadError as e:
+                import traceback
+                traceback.print_exc()
+                err = str(e)
+            except Exception as e:
+                err = str(e)
+
+            if self._cancelled:
+                return
+
+            try:
                 self.versions_loaded.emit({
                     "type": "loader_versions",
                     "loader": loader,
                     "mc_version": mc_version,
                     "builds": versions,
-                    "error": "",
+                    "error": err,
                 })
-            except LoaderDownloadError as e:
-                import traceback
-                traceback.print_exc()
-                self.versions_loaded.emit({
-                    "type": "loader_versions",
-                    "loader": loader,
-                    "mc_version": mc_version,
-                    "builds": [],
-                    "error": str(e),
-                })
-            except Exception as e:
-                self.versions_loaded.emit({
-                    "type": "loader_versions",
-                    "loader": loader,
-                    "mc_version": mc_version,
-                    "builds": [],
-                    "error": str(e),
-                })
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -263,15 +277,16 @@ class ServerSetupDialog(QDialog):
     # ========================================================
     @Slot(dict)
     def _on_versions_loaded(self, payload):
-        ptype = payload.get("type", "")
+        if self._cancelled:
+            return
 
+        ptype = payload.get("type", "")
         if ptype == "mc_versions":
             self._apply_mc_versions(payload)
         elif ptype == "loader_versions":
             self._apply_loader_versions(payload)
 
     def _apply_mc_versions(self, payload):
-        # 检查是不是当前加载器的返回（防止竞态）
         if payload.get("loader") != self._loader_combo.currentData():
             return
 
@@ -290,7 +305,7 @@ class ServerSetupDialog(QDialog):
         if not versions:
             self._mc_combo.addItem("没有可用版本")
             self._mc_combo.blockSignals(False)
-            self._status.setText("该加载器没有可用的 MC 版本")
+            self._status.setText("该服务端类型没有可用的 MC 版本")
             return
 
         for v in versions:
@@ -298,11 +313,9 @@ class ServerSetupDialog(QDialog):
         self._mc_combo.blockSignals(False)
         self._status.setText(f"共 {len(versions)} 个 MC 版本可用")
 
-        # 手动触发一次 MC 版本变化
         self._on_mc_changed(self._mc_combo.currentIndex())
 
     def _apply_loader_versions(self, payload):
-        # 检查当前上下文是否匹配（防止切换加载器后旧数据回调）
         if payload.get("loader") != self._loader_combo.currentData():
             return
         if payload.get("mc_version") != self._mc_combo.currentData():
@@ -320,7 +333,7 @@ class ServerSetupDialog(QDialog):
         builds = payload.get("builds", [])
         if not builds:
             self._build_combo.addItem("没有可用版本")
-            self._status.setText("该加载器没有适用于此 MC 版本的构建")
+            self._status.setText("该服务端类型没有适用于此 MC 版本的构建")
             return
 
         for v in builds[:200]:
@@ -350,12 +363,12 @@ class ServerSetupDialog(QDialog):
         target_dir = self._dir_entry.text().strip()
 
         if not loader:
-            QMessageBox.warning(self, "提示", "请选择加载器")
+            QMessageBox.warning(self, "提示", "请选择服务端类型")
             return
         if not mc_version or mc_version in ("加载中…", "加载失败", "没有可用版本"):
             QMessageBox.warning(self, "提示", "请选择有效的 MC 版本")
             return
-        if not isinstance(build, object) or build is None:
+        if build is None:
             QMessageBox.warning(self, "提示", "请选择加载器版本")
             return
         if not target_dir:
@@ -371,7 +384,6 @@ class ServerSetupDialog(QDialog):
             if reply != QMessageBox.Yes:
                 return
 
-        # 覆盖确认
         jar_path = target / "server.jar"
         if jar_path.exists():
             reply = QMessageBox.question(
@@ -398,19 +410,33 @@ class ServerSetupDialog(QDialog):
             self.state.log(msg, tag)
 
         def progress_cb(current, total, name):
-            self.progress_updated.emit(current, total, name)
+            if self._cancelled:
+                return
+            try:
+                self.progress_updated.emit(current, total, name)
+            except RuntimeError:
+                pass
 
         def worker():
             ok, msg = download_loader(
                 loader, mc_version, build.loader_version,
                 target, java_path=java_path, proxy=proxy,
                 log=log_cb, progress=progress_cb)
-            self.install_done.emit(ok, msg)
+
+            if self._cancelled:
+                return
+
+            try:
+                self.install_done.emit(ok, msg)
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
     @Slot(int, int, str)
     def _on_progress(self, current, total, name):
+        if self._cancelled:
+            return
         self._status.setText(f"{name}（{current}/{total}）")
         if total > 0:
             self._progress.setRange(0, total)
@@ -420,17 +446,45 @@ class ServerSetupDialog(QDialog):
 
     @Slot(bool, str)
     def _on_install_done(self, ok, msg):
+        if self._cancelled:
+            return
+
         self._installing = False
         self._install_btn.setEnabled(True)
         self._install_btn.setText("下载并安装")
         self._progress.setVisible(False)
 
-        if ok:
-            self._status.setText("✔ 安装完成")
-            self._status.setToolTip("")
-            QMessageBox.information(self, "安装完成", msg)
-            self.accept()
-        else:
+        if not ok:
             self._status.setText(f"✖ 安装失败：\n{msg}")
             self._status.setToolTip(msg)
             QMessageBox.critical(self, "安装失败", msg)
+            return
+
+        self._status.setText("✔ 安装完成")
+        self._status.setToolTip("")
+
+        # 首次安装：创建并激活服务器
+        if not self.state.has_server():
+            target_dir = Path(self._dir_entry.text().strip())
+            name = target_dir.name or "我的服务器"
+            try:
+                self.state.activate_server(name, str(target_dir))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                QMessageBox.critical(self, "激活服务器失败", f"{e}")
+
+            # 通知主窗口刷新侧边栏
+            try:
+                parent = self.parent()
+                if parent and hasattr(parent, "_server_selector"):
+                    parent._server_selector.reload()
+                elif parent and hasattr(parent, "window"):
+                    w = parent.window()
+                    if w and hasattr(w, "_server_selector"):
+                        w._server_selector.reload()
+            except Exception:
+                pass
+
+        QMessageBox.information(self, "安装完成", msg)
+        self.accept()

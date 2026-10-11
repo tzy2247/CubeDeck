@@ -160,10 +160,11 @@ def format_size(num_bytes: float) -> str:
     return f"{num_bytes:.1f} PB"
 
 
-def perform_backup(server_path: Path, rcon=None, log=None):
+def perform_backup(server_path: Path, rcon=None, log=None, backup_dir: Path = None):
     """
     执行一次完整备份。返回 (ok, dest_path, summary)。
     rcon 若已连接，会先冻结世界保存再复制。
+    backup_dir 若提供，则备份保存在该目录下；否则回退到 server_path.parent / "backups"。
     """
     if log is None:
         log = lambda m, t="info": None
@@ -173,7 +174,13 @@ def perform_backup(server_path: Path, rcon=None, log=None):
         return False, None, "服务器目录无效"
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_root = server_path.parent / "backups"
+
+    # ★ 修改点：优先使用传入的 backup_dir
+    if backup_dir is not None:
+        backup_root = Path(backup_dir)
+    else:
+        backup_root = server_path.parent / "backups"
+
     dest = backup_root / f"backup_{ts}"
 
     try:
@@ -316,12 +323,17 @@ def _copy_tree(src_dir: Path, dst_dir: Path, log):
     return copied_files, copied_dirs, skipped, errors
 
 
-def rotate_backups(server_path: Path, keep: int, log=None):
+def rotate_backups(server_path: Path, keep: int, log=None, backup_dir: Path = None):
     """只保留最新的 keep 个备份。"""
     if log is None:
         log = lambda m, t="info": None
     try:
-        root = server_path.parent / "backups"
+        # ★ 修改点：优先使用传入的 backup_dir
+        if backup_dir is not None:
+            root = Path(backup_dir)
+        else:
+            root = server_path.parent / "backups"
+
         if not root.exists():
             return
         backups = sorted(root.glob("backup_*"), key=lambda p: p.name)

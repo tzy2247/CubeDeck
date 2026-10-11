@@ -108,12 +108,19 @@ class MainWindow(QMainWindow):
         ll.addWidget(t2)
 
         sl.addWidget(logo)
+        # ★ 服务器切换器
+        from ui_qt.widgets.server_selector import ServerSelector
 
-        # ---- 分隔线 ----
-        line = QFrame()
-        line.setObjectName("HLine")
-        line.setFixedHeight(1)
-        sl.addWidget(line)
+        selector_wrap = QWidget()
+        sel_layout = QVBoxLayout(selector_wrap)
+        sel_layout.setContentsMargins(20, 0, 20, 14)
+        sel_layout.setSpacing(0)
+
+        self._server_selector = ServerSelector(self.state)
+        self._server_selector.server_changed.connect(self._on_server_switch)
+        sel_layout.addWidget(self._server_selector)
+
+        sl.addWidget(selector_wrap)
 
         # ---- 导航 ----
         self._nav = QListWidget()
@@ -253,6 +260,38 @@ class MainWindow(QMainWindow):
             pass
 
     # ========================================================
+    def _on_server_switch(self, server_id):
+        """侧边栏切换服务器。"""
+        before_id = self.state.server_id
+        self.state.request_switch_server(server_id)
+
+        if self.state.server_id == before_id:
+            self._server_selector.reload()
+            return
+
+        # 刷新所有页面
+        for p in self._pages:
+            if hasattr(p, "on_show"):
+                try:
+                    p.on_show()
+                except Exception as e:
+                    self.state.log(
+                        f"[UI] {type(p).__name__} 刷新失败：{e}", "warn")
+
+        # 复位页头状态（内联样式）
+        self._header_status.setText("●  离线")
+        self._header_status.setStyleSheet(
+            f"color: {theme.c('text_dim')}; "
+            f"background-color: {theme.c('card')}; "
+            f"border: 1px solid {theme.c('border')}; "
+            f"border-radius: 12px; "
+            f"padding: 4px 14px; font-size: 12px;")
+        self._rcon_dot.setStyleSheet(
+            f"color: {theme.c('text_faint')}; font-size: 12px;")
+        self._rcon_label.setText("RCON 未连接")
+        self._rcon_label.setStyleSheet(
+            f"color: {theme.c('text_faint')}; font-size: 11px;")
+
     def _on_server_starting(self):
         self._refresh_status_chip("orange", "启动中")
 

@@ -92,8 +92,8 @@ class ModInstaller:
                 project_id=project_id,
                 project_title=title,
                 file=chosen,
-                target_dir=None,        # 稍后统一填
-                source=self.store.get_source(),
+                target_dir=None,
+                source=getattr(self.store, "name", ""),
             ))
 
             # 递归处理 required 依赖

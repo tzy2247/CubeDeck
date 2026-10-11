@@ -1,18 +1,35 @@
-"""插件 / 模组 / 整合包商店，支持 Modrinth 和 CurseForge 双源。"""
+"""插件 / 模组 / 整合包商店，支持 Modrinth 和 CurseForge 双源。
+
+包含两个视图（QStackedWidget 切换）：
+  0 = 搜索结果
+  1 = 版本选择
+另支持导入 .mrpack 整合包。
+"""
+import hashlib
 import threading
 import zipfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QScrollArea, QFrame, QMessageBox,
+    QStackedWidget, QFileDialog, QProgressDialog,
 )
+
+import requests
 
 from ui_qt.theme import theme
 from ui_qt.pages.base import BasePage
 from ui_qt.widgets.card import Card
 from core.store_manager import StoreManager
+from core.modrinth import USER_AGENT
+from core.mrpack_installer import (
+    install_mrpack, count_server_files, MrpackError,
+)
+from core.downloader import Downloader
+from core import paths
 
 
 LOADERS = [
@@ -27,10 +44,9 @@ LOADERS = [
     ("Quilt", "quilt"),
 ]
 
-# (显示名, 内部类型, 安装目标)
 PROJECT_TYPES = [
     ("插件（服务端）", "plugin", "plugins"),
-    ("模组（服务端）", "mod", "mods"),
+    ("模组", "mod", "mods"),
     ("整合包", "modpack", "__modpack__"),
     ("数据包", "datapack", "world/datapacks"),
     ("资源包", "resourcepack", "resourcepacks"),
@@ -38,18 +54,107 @@ PROJECT_TYPES = [
 
 DEFAULT_INDEX = "downloads"
 DEFAULT_LIMIT = 20
+ICON_SIZE = 48
 
 
+# ============================================================
+#  图标缓存
+# ============================================================
+def _icon_cache_dir():
+    d = paths.USERDATA_ROOT / "cache" / "icons"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _icon_cache_path(url):
+    if not url:
+        return None
+    h = hashlib.md5(url.encode()).hexdigest()
+    return _icon_cache_dir() / f"{h}.img"
+
+
+def _load_icon_bytes(url, proxy=None):
+    if not url:
+        return None
+
+    cache_path = _icon_cache_path(url)
+    if cache_path and cache_path.exists():
+        try:
+            return cache_path.read_bytes()
+        except Exception:
+            pass
+
+    try:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        session.verify = False
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+        try:
+            import urllib3
+            urllib3.disable_warnings()
+        except Exception:
+            pass
+
+        resp = session.get(url, timeout=15)
+        if resp.ok and resp.content:
+            data = resp.content
+            if cache_path:
+                try:
+                    cache_path.write_bytes(data)
+                except Exception:
+                    pass
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _fmt_size(n):
+    if not n:
+        return "未知"
+    f = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if f < 1024:
+            return f"{f:.1f} {unit}"
+        f /= 1024
+    return f"{f:.1f} TB"
+
+
+# ============================================================
+#  安装进度对话框
+# ============================================================
+class InstallProgressDialog(QProgressDialog):
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.setWindowTitle(f"安装 · {title}")
+        self.setLabelText("准备中…")
+        self.setCancelButtonText("后台运行")
+        self.setRange(0, 0)
+        self.setWindowModality(Qt.WindowModal)
+        self.setMinimumWidth(440)
+        self.setMinimumDuration(0)
+        self.setAutoClose(False)
+        self.setAutoReset(False)
+        self.canceled.connect(self.hide)
+
+
+# ============================================================
+#  主页面
+# ============================================================
 class PluginStorePage(BasePage):
     search_done = Signal(dict)
+    files_loaded = Signal(dict)
     install_done = Signal(str, str)
     install_failed = Signal(str)
+    icon_loaded = Signal(str, bytes)
+    progress_bytes = Signal(int, int, str)
+    progress_step = Signal(int, int, str)
 
     def __init__(self, state, parent=None):
         super().__init__(state, parent)
 
-        self.store = StoreManager(
-            state.config_data, log_callback=state.log)
+        self.store = StoreManager(state.config_data)
         self.store.set_source(
             state.config_data.get("store_source", "modrinth"))
 
@@ -60,11 +165,20 @@ class PluginStorePage(BasePage):
         self._installing = False
         self._loaded_once = False
 
+        self._icon_labels = {}
+        self._current_hit = None
+        self._current_files = []
+        self._progress_dlg = None
+
         self._build()
 
         self.search_done.connect(self._on_search_result)
+        self.files_loaded.connect(self._on_files_loaded)
         self.install_done.connect(self._on_install_finished)
         self.install_failed.connect(self._on_install_failed)
+        self.icon_loaded.connect(self._on_icon_loaded)
+        self.progress_bytes.connect(self._on_progress_bytes)
+        self.progress_step.connect(self._on_progress_step)
 
     # ========================================================
     #  构建
@@ -72,47 +186,65 @@ class PluginStorePage(BasePage):
     def _build(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack)
+
+        self._search_view = self._build_search_view()
+        self._stack.addWidget(self._search_view)
+
+        self._versions_view = self._build_versions_view()
+        self._stack.addWidget(self._versions_view)
+
+        self._stack.setCurrentIndex(0)
+
+    # --------------------------------------------------------
+    #  搜索视图
+    # --------------------------------------------------------
+    def _build_search_view(self):
+        w = QWidget()
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
-        # ---- 搜索栏 ----
         search_card = Card()
         sl = search_card.body()
         sl.setContentsMargins(20, 14, 20, 14)
         sl.setSpacing(10)
 
-        # 第 0 行：来源切换
         row0 = QHBoxLayout()
         row0.setSpacing(10)
-
         row0.addWidget(self._make_label("来源"))
         self._source_combo = QComboBox()
         for key, label in self.store.list_sources():
             self._source_combo.addItem(label, key)
         self._source_combo.setFixedHeight(34)
         self._source_combo.setFixedWidth(160)
-        # 设置到上次使用的源
         saved_source = self.state.config_data.get("store_source", "modrinth")
         idx = self._source_combo.findData(saved_source)
         if idx >= 0:
             self._source_combo.setCurrentIndex(idx)
-        self._source_combo.currentIndexChanged.connect(
-            self._on_source_changed)
+        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
         row0.addWidget(self._source_combo)
+
+        import_btn = QPushButton("导入 .mrpack")
+        import_btn.setObjectName("Ghost")
+        import_btn.setFixedHeight(34)
+        import_btn.setFixedWidth(140)
+        import_btn.clicked.connect(self._import_mrpack)
+        row0.addWidget(import_btn)
 
         row0.addStretch()
 
         self._cf_status = QLabel("")
         self._cf_status.setStyleSheet(
-            f"color: {theme.c('orange')};"
-            f"font-size: 11px; background: transparent;")
+            f"color: {theme.c('orange')}; font-size: 11px; "
+            f"background: transparent;")
         row0.addWidget(self._cf_status)
-
         sl.addLayout(row0)
 
-        # 第 1 行：搜索框
         row1 = QHBoxLayout()
         row1.setSpacing(10)
-
         self._search_entry = QLineEdit()
         self._search_entry.setPlaceholderText(
             "搜索…（如 LuckPerms、Sodium、Fabulously Optimized）")
@@ -128,10 +260,8 @@ class PluginStorePage(BasePage):
         row1.addWidget(search_btn)
         sl.addLayout(row1)
 
-        # 第 2 行：过滤
         row2 = QHBoxLayout()
         row2.setSpacing(10)
-
         row2.addWidget(self._make_label("类型"))
         self._type_combo = QComboBox()
         for label, key, _ in PROJECT_TYPES:
@@ -159,34 +289,27 @@ class PluginStorePage(BasePage):
         row2.addWidget(self._version_entry)
 
         row2.addStretch()
-
         self._status_label = QLabel("")
         self._status_label.setStyleSheet(
             f"color: {theme.c('text_dim')}; font-size: 11px; "
             f"background: transparent;")
         row2.addWidget(self._status_label)
-
         sl.addLayout(row2)
         root.addWidget(search_card)
 
-        # ---- 结果列表 ----
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-
         self._list_widget = QWidget()
         self._list_layout = QVBoxLayout(self._list_widget)
         self._list_layout.setContentsMargins(0, 0, 8, 0)
         self._list_layout.setSpacing(8)
         self._list_layout.addStretch()
-
         scroll.setWidget(self._list_widget)
         root.addWidget(scroll, 1)
 
-        # ---- 分页 ----
         bottom = QHBoxLayout()
         bottom.setSpacing(10)
-
         self._prev_btn = QPushButton("上一页")
         self._prev_btn.setObjectName("Ghost")
         self._prev_btn.setFixedHeight(34)
@@ -205,11 +328,82 @@ class PluginStorePage(BasePage):
         self._next_btn.setFixedHeight(34)
         self._next_btn.clicked.connect(self._next_page)
         bottom.addWidget(self._next_btn)
-
         bottom.addStretch()
         root.addLayout(bottom)
 
         self._show_placeholder("正在加载热门内容…")
+        return w
+
+    # --------------------------------------------------------
+    #  版本视图
+    # --------------------------------------------------------
+    def _build_versions_view(self):
+        w = QWidget()
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
+
+        top_card = Card()
+        tl = top_card.body()
+        tl.setContentsMargins(20, 14, 20, 14)
+        tr = QHBoxLayout()
+        tr.setSpacing(12)
+
+        back_btn = QPushButton("← 返回")
+        back_btn.setObjectName("Ghost")
+        back_btn.setFixedHeight(36)
+        back_btn.setFixedWidth(90)
+        back_btn.clicked.connect(self._back_to_search)
+        tr.addWidget(back_btn)
+
+        self._versions_title = QLabel("选择版本")
+        self._versions_title.setStyleSheet(
+            f"color: {theme.c('text')}; "
+            f"font-size: 15px; font-weight: bold; background: transparent;")
+        tr.addWidget(self._versions_title)
+        tr.addStretch()
+
+        self._versions_status = QLabel("")
+        self._versions_status.setStyleSheet(
+            f"color: {theme.c('text_dim')}; font-size: 12px; "
+            f"background: transparent;")
+        tr.addWidget(self._versions_status)
+
+        tl.addLayout(tr)
+        root.addWidget(top_card)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        self._versions_widget = QWidget()
+        self._versions_layout = QVBoxLayout(self._versions_widget)
+        self._versions_layout.setContentsMargins(0, 0, 8, 0)
+        self._versions_layout.setSpacing(8)
+        self._versions_layout.addStretch()
+        scroll.setWidget(self._versions_widget)
+        root.addWidget(scroll, 1)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+
+        self._auto_install_btn = QPushButton("自动安装最新版（含依赖）")
+        self._auto_install_btn.setObjectName("Accent")
+        self._auto_install_btn.setFixedHeight(38)
+        self._auto_install_btn.clicked.connect(self._auto_install)
+        self._auto_install_btn.setEnabled(False)
+        bottom.addWidget(self._auto_install_btn)
+
+        bottom.addStretch()
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("Ghost")
+        cancel_btn.setFixedHeight(38)
+        cancel_btn.setFixedWidth(90)
+        cancel_btn.clicked.connect(self._back_to_search)
+        bottom.addWidget(cancel_btn)
+
+        root.addLayout(bottom)
+        return w
 
     def _make_label(self, text):
         lbl = QLabel(text)
@@ -219,18 +413,40 @@ class PluginStorePage(BasePage):
         return lbl
 
     # ========================================================
+    #  视图切换
+    # ========================================================
+    def _back_to_search(self):
+        self._stack.setCurrentIndex(0)
+
+    def _show_versions_view(self, hit):
+        self._current_hit = hit
+        self._current_files = []
+        self._versions_title.setText(f"选择版本 · {hit.title}")
+
+        self._clear_versions_layout()
+        loading = QLabel("正在加载版本列表…")
+        loading.setAlignment(Qt.AlignCenter)
+        loading.setStyleSheet(
+            f"color: {theme.c('text_faint')}; font-size: 14px; "
+            f"padding: 60px; background: transparent;")
+        self._versions_layout.addWidget(loading)
+        self._versions_layout.addStretch()
+
+        self._versions_status.setText("加载中…")
+        self._auto_install_btn.setEnabled(False)
+        self._stack.setCurrentIndex(1)
+
+    # ========================================================
     #  源切换
     # ========================================================
     def _on_source_changed(self, idx):
         source = self._source_combo.currentData()
         if not source:
             return
-
         self.store.set_source(source)
         self.state.config_data["store_source"] = source
         self.state.save_config()
 
-        # CurseForge 未配置 API Key 时提示
         if source == "curseforge":
             key = self.state.config_data.get(
                 "curseforge_api_key", "").strip()
@@ -238,15 +454,9 @@ class PluginStorePage(BasePage):
                 self._cf_status.setText("未配置 API Key")
                 self._show_placeholder(
                     "CurseForge 需要 API Key\n\n"
-                    "请到 设置 → CurseForge 填写。\n"
-                    "申请地址：https://console.curseforge.com/#/api-keys")
+                    "请到 设置 → CurseForge 填写。")
                 return
-            else:
-                self._cf_status.setText("")
-        else:
-            self._cf_status.setText("")
-
-        # 重新搜索
+        self._cf_status.setText("")
         self._do_search(reset=True)
 
     # ========================================================
@@ -256,7 +466,6 @@ class PluginStorePage(BasePage):
         if not hasattr(self, "_search_entry"):
             return
 
-        # 检查 CurseForge 是否已配置
         if self.store.get_source() == "curseforge":
             key = self.state.config_data.get(
                 "curseforge_api_key", "").strip()
@@ -271,18 +480,13 @@ class PluginStorePage(BasePage):
         loader = self._loader_combo.currentData()
         game_version = self._version_entry.text().strip() or None
 
-        # CurseForge 没有 plugin / shader 类型，做映射
         if self.store.get_source() == "curseforge":
             if project_type == "plugin":
                 project_type = "mod"
-            elif project_type == "shader":
-                project_type = "resourcepack"
             elif project_type == "datapack":
-                # CurseForge 数据包不在 mods 里，用 mod 兜底
                 project_type = "mod"
 
         index = DEFAULT_INDEX if not query else "relevance"
-
         self._status_label.setText("搜索中…")
 
         def worker():
@@ -322,8 +526,7 @@ class PluginStorePage(BasePage):
             self._status_label.setText(
                 f"找到 {total} 个结果 · 第 {page} 页")
         else:
-            self._status_label.setText(
-                f"热门内容 · 第 {page} 页")
+            self._status_label.setText(f"热门内容 · 第 {page} 页")
 
         self._clear_list()
         if not hits:
@@ -342,10 +545,8 @@ class PluginStorePage(BasePage):
     def _update_pagination(self):
         page = self._current_offset // self._page_size + 1
         self._page_label.setText(f"第 {page} 页")
-
         self._prev_btn.setEnabled(self._current_offset > 0)
-        # CurseForge 不返回准确 total_hits，用"当前页满"近似判断
-        has_next = (len(self._results) >= self._page_size)
+        has_next = len(self._results) >= self._page_size
         self._next_btn.setEnabled(has_next)
 
     def _prev_page(self):
@@ -358,19 +559,31 @@ class PluginStorePage(BasePage):
         self._do_search(reset=False)
 
     # ========================================================
-    #  列表项
+    #  搜索结果项
     # ========================================================
     def _make_result_item(self, hit):
         item = QFrame()
         item.setObjectName("Card")
         il = QHBoxLayout(item)
-        il.setContentsMargins(20, 14, 20, 14)
+        il.setContentsMargins(16, 12, 16, 12)
         il.setSpacing(14)
+
+        icon_label = QLabel("·")
+        icon_label.setFixedSize(ICON_SIZE, ICON_SIZE)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet(
+            f"background-color: {theme.c('card_hover')}; "
+            f"border-radius: 8px; "
+            f"color: {theme.c('text_faint')}; font-size: 18px;")
+        il.addWidget(icon_label)
+
+        self._icon_labels[hit.project_id] = icon_label
+        if hit.icon_url:
+            self._load_icon_async(hit.project_id, hit.icon_url)
 
         info = QVBoxLayout()
         info.setSpacing(4)
 
-        # 名称行
         name_row = QHBoxLayout()
         name_row.setSpacing(8)
 
@@ -387,7 +600,6 @@ class PluginStorePage(BasePage):
                 f"background: transparent;")
             name_row.addWidget(author)
 
-        # 服务端 / 客户端标签
         tags = []
         if hit.server_side in ("required", "optional"):
             tags.append("服务端")
@@ -403,7 +615,6 @@ class PluginStorePage(BasePage):
         name_row.addStretch()
         info.addLayout(name_row)
 
-        # 描述
         desc = QLabel((hit.description or "")[:200])
         desc.setWordWrap(True)
         desc.setStyleSheet(
@@ -411,7 +622,6 @@ class PluginStorePage(BasePage):
             f"background: transparent;")
         info.addWidget(desc)
 
-        # 统计
         stats_parts = []
         if hit.downloads:
             stats_parts.append(f"下载 {hit.downloads:,}")
@@ -435,6 +645,40 @@ class PluginStorePage(BasePage):
 
         return item
 
+    def _load_icon_async(self, project_id, icon_url):
+        proxy = self.state.config_data.get(
+            "modrinth_proxy", "").strip() or None
+
+        def worker():
+            data = _load_icon_bytes(icon_url, proxy=proxy)
+            if data:
+                self.icon_loaded.emit(project_id, data)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot(str, bytes)
+    def _on_icon_loaded(self, project_id, data):
+        label = self._icon_labels.get(project_id)
+        if label is None:
+            return
+        try:
+            if not label.isVisible() and label.parent() is None:
+                return
+        except Exception:
+            pass
+
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        pixmap = pixmap.scaled(
+            ICON_SIZE - 8, ICON_SIZE - 8,
+            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        try:
+            label.setText("")
+            label.setPixmap(pixmap)
+        except Exception:
+            pass
+
     def _show_placeholder(self, text):
         self._clear_list()
         lbl = QLabel(text)
@@ -452,9 +696,153 @@ class PluginStorePage(BasePage):
             w = item.widget()
             if w:
                 w.deleteLater()
+        self._icon_labels.clear()
 
     # ========================================================
-    #  安装
+    #  打开版本列表
+    # ========================================================
+    def _install(self, hit):
+        if self._installing:
+            QMessageBox.information(self, "提示", "已有安装任务进行中")
+            return
+
+        self._show_versions_view(hit)
+
+        loader = self._loader_combo.currentData()
+        game_version = self._version_entry.text().strip() or None
+
+        def worker():
+            try:
+                files = self.store.get_files(
+                    hit.project_id,
+                    game_version=game_version,
+                    loader=loader,
+                )
+                self.files_loaded.emit({
+                    "hit": hit,
+                    "files": files,
+                    "error": "",
+                })
+            except Exception as e:
+                self.files_loaded.emit({
+                    "hit": hit,
+                    "files": [],
+                    "error": str(e),
+                })
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot(dict)
+    def _on_files_loaded(self, payload):
+        hit = payload.get("hit")
+        files = payload.get("files", [])
+        err = payload.get("error", "")
+
+        if self._current_hit is not hit:
+            return
+
+        self._current_files = files
+
+        if err:
+            self._clear_versions_layout()
+            lbl = QLabel(f"加载失败：\n\n{err}")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(
+                f"color: {theme.c('red')}; font-size: 13px; "
+                f"padding: 60px; background: transparent;")
+            self._versions_layout.addWidget(lbl)
+            self._versions_layout.addStretch()
+            self._versions_status.setText("失败")
+            self._auto_install_btn.setEnabled(False)
+            return
+
+        if not files:
+            self._clear_versions_layout()
+            loader_cn = self._loader_combo.currentText()
+            gv = self._version_entry.text().strip() or "任意"
+            lbl = QLabel(
+                f"没有找到兼容的版本。\n\n"
+                f"当前过滤：\n"
+                f"  加载器 = {loader_cn}\n"
+                f"  游戏版本 = {gv}\n\n"
+                f"试试把过滤条件改成「全部」和空版本。")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(
+                f"color: {theme.c('text_faint')}; font-size: 13px; "
+                f"padding: 60px; background: transparent;")
+            self._versions_layout.addWidget(lbl)
+            self._versions_layout.addStretch()
+            self._versions_status.setText("0 个版本")
+            self._auto_install_btn.setEnabled(False)
+            return
+
+        self._clear_versions_layout()
+        for f in files[:300]:
+            self._versions_layout.addWidget(self._make_version_row(f))
+        self._versions_layout.addStretch()
+
+        self._versions_status.setText(f"共 {len(files)} 个版本")
+        self._auto_install_btn.setEnabled(True)
+
+    def _make_version_row(self, file):
+        row = QFrame()
+        row.setObjectName("Card")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(16, 10, 16, 10)
+        rl.setSpacing(12)
+
+        info = QVBoxLayout()
+        info.setSpacing(3)
+
+        name = QLabel(file.filename)
+        name.setStyleSheet(
+            f"color: {theme.c('text')}; font-size: 13px; "
+            f"background: transparent;")
+        name.setWordWrap(True)
+        info.addWidget(name)
+
+        gv_list = file.game_versions or []
+        gv = ", ".join(gv_list[:5])
+        if len(gv_list) > 5:
+            gv += "…"
+        gv = gv or "—"
+
+        ld = ", ".join(file.loaders) if file.loaders else "—"
+        rt_cn = {
+            "release": "正式",
+            "beta": "测试",
+            "alpha": "开发",
+        }.get(file.release_type, file.release_type)
+
+        meta = QLabel(
+            f"MC {gv}   ·   {ld}   ·   {rt_cn}   ·   {_fmt_size(file.size)}")
+        meta.setStyleSheet(
+            f"color: {theme.c('text_faint')}; font-size: 11px; "
+            f"background: transparent;")
+        meta.setWordWrap(True)
+        info.addWidget(meta)
+
+        rl.addLayout(info, 1)
+
+        btn = QPushButton("下载")
+        btn.setObjectName("Green")
+        btn.setFixedSize(80, 32)
+        btn.clicked.connect(lambda _=False, f=file: self._download_one(f))
+        rl.addWidget(btn)
+
+        return row
+
+    def _clear_versions_layout(self):
+        while self._versions_layout.count():
+            item = self._versions_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+    # ========================================================
+    #  目录选择
     # ========================================================
     def _get_project_meta(self):
         idx = self._type_combo.currentIndex()
@@ -463,112 +851,317 @@ class PluginStorePage(BasePage):
             return key, target
         return "plugin", "plugins"
 
-    def _install(self, hit):
+    def _default_target_dir(self, hit):
+        project_type, target_subdir = self._get_project_meta()
+        if target_subdir == "__modpack__":
+            return self.state.server_path / "modpacks" / hit.title
+        return self.state.server_path / target_subdir
+
+    def _choose_target_dir(self, hit):
+        default = self._default_target_dir(hit)
+        try:
+            default.mkdir(parents=True, exist_ok=True)
+            start_dir = str(default)
+        except Exception:
+            start_dir = str(self.state.server_path)
+
+        path = QFileDialog.getExistingDirectory(
+            self,
+            f"选择「{hit.title}」的下载位置",
+            start_dir,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not path:
+            return None
+        return Path(path)
+
+    # ========================================================
+    #  下载
+    # ========================================================
+    def _download_one(self, file):
         if self._installing:
             QMessageBox.information(self, "提示", "已有安装任务进行中")
             return
-
-        project_type, target_subdir = self._get_project_meta()
-
-        warn_text = ""
-        if project_type == "mod":
-            warn_text = ("\n\n⚠ 服务端只能安装标注「服务端」的模组。\n"
-                         "   会自动安装 required 依赖。")
-        elif project_type == "modpack":
-            warn_text = ("\n\n⚠ 整合包通常以客户端为主。\n"
-                         "   安装后请手动挑选服务端模组。")
-
-        reply = QMessageBox.question(
-            self, "安装",
-            f"确定要安装「{hit.title}」吗？{warn_text}",
-            QMessageBox.Yes | QMessageBox.No)
-        if reply != QMessageBox.Yes:
+        hit = self._current_hit
+        if hit is None:
             return
 
-        loader = self._loader_combo.currentData()
-        game_version = self._version_entry.text().strip() or None
+        target_dir = self._choose_target_dir(hit)
+        if target_dir is None:
+            return
 
-        # 决定目标目录
-        if target_subdir == "__modpack__":
-            target_dir = self.state.server_path / "modpacks" / hit.title
-        else:
-            target_dir = self.state.server_path / target_subdir
+        self._do_install(hit, file, target_dir, with_deps=False)
 
+    def _auto_install(self):
+        if self._installing:
+            QMessageBox.information(self, "提示", "已有安装任务进行中")
+            return
+        hit = self._current_hit
+        if hit is None:
+            return
+
+        target_dir = self._choose_target_dir(hit)
+        if target_dir is None:
+            return
+
+        self._do_install(hit, None, target_dir, with_deps=True)
+
+    def _do_install(self, hit, file, target_dir, with_deps=False):
         self._installing = True
-        self.state.log(f"正在解析「{hit.title}」的依赖…", "info")
+        target_dir = Path(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
 
-        def on_progress(current, total, title):
-            self._status_label.setText(
-                f"安装中 {current}/{total}：{title}")
+        if with_deps:
+            self.state.log(f"开始安装「{hit.title}」（含依赖）", "info")
+        else:
+            self.state.log(
+                f"开始安装「{hit.title}」（{file.filename}）", "info")
+
+        self._progress_dlg = InstallProgressDialog(self, hit.title)
+        self._progress_dlg.setLabelText("准备中…")
+        self._progress_dlg.show()
 
         def worker():
             try:
-                ok, fail, skip, plan = self.store.installer.install_with_dependencies(
-                    project_id=hit.project_id,
-                    title=hit.title,
-                    target_dir=target_dir,
-                    game_version=game_version,
-                    loader=loader,
-                    progress_callback=on_progress,
-                )
-                summary = (
-                    f"安装完成：成功 {ok}，失败 {fail}，跳过 {skip}\n"
-                    f"目标目录：{target_dir}")
+                if with_deps:
+                    loader = self._loader_combo.currentData()
+                    game_version = (self._version_entry.text().strip()
+                                    or None)
+
+                    def step_cb(current, total, title):
+                        self.progress_step.emit(current, total, title)
+
+                    ok, fail, skip, plan = (
+                        self.store.installer.install_with_dependencies(
+                            project_id=hit.project_id,
+                            title=hit.title,
+                            target_dir=target_dir,
+                            game_version=game_version,
+                            loader=loader,
+                            progress_callback=step_cb,
+                        ))
+                    summary = (
+                        f"成功 {ok}，失败 {fail}，跳过 {skip}\n"
+                        f"目标目录：{target_dir}")
+                else:
+                    dest = target_dir / file.filename
+                    urls = file.fallback_urls or [file.download_url]
+
+                    def byte_cb(downloaded, total):
+                        self.progress_bytes.emit(
+                            downloaded, total, file.filename)
+
+                    self.store.download(urls, dest,
+                                        progress_callback=byte_cb)
+                    summary = (
+                        f"文件：{file.filename}\n"
+                        f"目标目录：{target_dir}")
+
                 self.install_done.emit(hit.title, summary)
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.install_failed.emit(str(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ========================================================
+    #  进度更新
+    # ========================================================
+    @Slot(int, int, str)
+    def _on_progress_bytes(self, downloaded, total, filename):
+        if not self._progress_dlg:
+            return
+        try:
+            if total > 0:
+                self._progress_dlg.setRange(0, 100)
+                self._progress_dlg.setValue(
+                    int(downloaded * 100 / total))
+                self._progress_dlg.setLabelText(
+                    f"下载中：{filename}\n"
+                    f"{_fmt_size(downloaded)} / {_fmt_size(total)}")
+            else:
+                self._progress_dlg.setRange(0, 0)
+                self._progress_dlg.setLabelText(
+                    f"下载中：{filename}\n"
+                    f"已下载 {_fmt_size(downloaded)}")
+        except Exception:
+            pass
+
+    @Slot(int, int, str)
+    def _on_progress_step(self, current, total, title):
+        if not self._progress_dlg:
+            return
+        try:
+            self._progress_dlg.setRange(0, total)
+            self._progress_dlg.setValue(current)
+            self._progress_dlg.setLabelText(
+                f"安装中（{current}/{total}）：{title}")
+        except Exception:
+            pass
+
+    # ========================================================
+    #  安装完成/失败
+    # ========================================================
     @Slot(str, str)
     def _on_install_finished(self, title, summary):
         self._installing = False
-        self._status_label.setText("")
+
+        if self._progress_dlg:
+            try:
+                self._progress_dlg.close()
+                self._progress_dlg.deleteLater()
+            except Exception:
+                pass
+            self._progress_dlg = None
+
         self.state.log(f"「{title}」安装完成", "ok")
         QMessageBox.information(
             self, "安装完成",
-            f"「{title}」安装完成。\n\n{summary}\n\n"
+            f"「{title}」已安装。\n\n{summary}\n\n"
             f"⚠ 需要重启服务器才能生效。")
-
-    def _extract_modpack(self, zip_path, dest_dir):
-        try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(dest_dir)
-        finally:
-            try:
-                zip_path.unlink()
-            except Exception:
-                pass
-
-    @Slot(str, str)
-    def _on_install_finished(self, title, filename):
-        self._installing = False
-        project_type, _ = self._get_project_meta()
-
-        if project_type == "modpack":
-            extra = ("\n\n整合包已解压到 modpacks/ 目录。\n"
-                     "请手动挑选用得到的模组复制到 mods/。")
-        else:
-            extra = "\n\n⚠ 需要重启服务器才能生效。"
-
-        self.state.log(f"「{title}」安装完成：{filename}", "ok")
-        QMessageBox.information(
-            self, "安装完成",
-            f"「{title}」已安装。\n\n文件：{filename}{extra}")
+        self._back_to_search()
 
     @Slot(str)
     def _on_install_failed(self, error):
         self._installing = False
+
+        if self._progress_dlg:
+            try:
+                self._progress_dlg.close()
+                self._progress_dlg.deleteLater()
+            except Exception:
+                pass
+            self._progress_dlg = None
+
         self.state.log(f"安装失败：{error}", "error")
         QMessageBox.critical(self, "安装失败", error)
+
+    # ========================================================
+    #  导入 .mrpack
+    # ========================================================
+    def _import_mrpack(self):
+        if self._installing:
+            QMessageBox.information(self, "提示", "已有安装任务进行中")
+            return
+
+        mrpack_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 .mrpack 整合包",
+            str(self.state.server_path.parent),
+            "Modrinth 整合包 (*.mrpack);;所有文件 (*)",
+        )
+        if not mrpack_path:
+            return
+
+        # 解析并显示信息
+        try:
+            n_files, info = count_server_files(mrpack_path)
+        except MrpackError as e:
+            QMessageBox.critical(self, "解析失败", str(e))
+            return
+
+        if n_files == 0:
+            QMessageBox.warning(
+                self, "提示",
+                "该整合包没有适合服务端的文件。\n\n"
+                "可能它只在客户端使用。")
+            return
+
+        msg = (
+            f"整合包：{info.name}\n"
+            f"版本：{info.version_id or '(未知)'}\n"
+            f"MC 版本：{info.mc_version or '(未知)'}\n"
+            f"加载器：{info.loader or '原版'} "
+            f"{info.loader_version}\n\n"
+            f"服务端需下载 {n_files} 个文件。\n\n"
+            f"继续吗？")
+        reply = QMessageBox.question(
+            self, "导入整合包", msg,
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # 选择目标目录
+        default_dir = str(self.state.server_path)
+        target_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择安装位置（通常直接选服务器根目录）",
+            default_dir,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not target_dir:
+            return
+
+        # 可选文件询问
+        include_optional = False
+        opt_count = sum(
+            1 for f in info.files if f.server_env == "optional")
+        if opt_count > 0:
+            reply2 = QMessageBox.question(
+                self, "可选文件",
+                f"整合包中有 {opt_count} 个服务端标记为「可选」的文件。\n\n"
+                f"是否一并下载？\n"
+                f"（推荐：否，避免不必要的资源占用）",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No)
+            include_optional = (reply2 == QMessageBox.Yes)
+
+        self._do_import_mrpack(
+            Path(mrpack_path), Path(target_dir), include_optional)
+
+    def _do_import_mrpack(self, mrpack_path, target_dir,
+                          include_optional=False):
+        self._installing = True
+
+        self.state.log(
+            f"开始导入整合包：{mrpack_path.name} → {target_dir}", "info")
+
+        self._progress_dlg = InstallProgressDialog(
+            self, mrpack_path.stem)
+        self._progress_dlg.setLabelText("准备中…")
+        self._progress_dlg.show()
+
+        proxy = self.state.config_data.get(
+            "modrinth_proxy", "").strip() or None
+        downloader = Downloader(proxy=proxy, verify_ssl=False)
+
+        def log_cb(msg, tag="info"):
+            self.state.log(msg, tag)
+
+        def progress_cb(current, total, name):
+            self.progress_step.emit(current, total, name)
+
+        def worker():
+            try:
+                ok, fail, skip, errors = install_mrpack(
+                    mrpack_path, target_dir, downloader,
+                    log=log_cb, progress=progress_cb,
+                    include_optional=include_optional,
+                )
+                summary = (
+                    f"成功 {ok}，失败 {fail}，跳过 {skip}\n"
+                    f"安装位置：{target_dir}")
+                if errors:
+                    summary += f"\n\n部分失败：\n"
+                    for path, err in errors[:5]:
+                        summary += f"  · {path}: {err[:80]}\n"
+                    if len(errors) > 5:
+                        summary += f"  ... 还有 {len(errors) - 5} 个"
+
+                self.install_done.emit(mrpack_path.stem, summary)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.install_failed.emit(str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ========================================================
     #  生命周期
     # ========================================================
     def on_show(self):
-        # 每次进入都重新读配置（代理、API Key 可能刚改）
         self.store.reload()
-
         if self._loaded_once:
             return
         self._loaded_once = True

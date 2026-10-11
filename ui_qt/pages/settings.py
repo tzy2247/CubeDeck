@@ -74,9 +74,41 @@ class SettingsPage(BasePage):
         # ====================================================
         #  服务器
         # ====================================================
+        # ---- 服务器管理 ----
+        c0 = Card(title="服务器管理")
+        b0 = c0.body()
+
+        hint = QLabel(
+            "在这里管理多个服务器。每个服务器有独立的配置、\n"
+            "权限、保护区、备份记录和 AI 对话历史。")
+        hint.setStyleSheet(
+            f"color: {theme.c('text_faint')}; font-size: 11px; "
+            f"background: transparent;")
+        hint.setWordWrap(True)
+        b0.addWidget(hint)
+
+        from ui_qt.widgets.server_manager import ServerManagerWidget
+        self._server_manager = ServerManagerWidget(self.state)
+        self._server_manager.changed.connect(self._on_server_list_changed)
+        b0.addWidget(self._server_manager)
+
+        bl.addWidget(c0)
+
         c1 = Card(title="服务器")
         b1 = c1.body()
         self.e_server = self._path_row(b1, "服务器目录", "dir", openable=True)
+        # 下载服务端加载器
+        dl_row = QHBoxLayout()
+        dl_row.setSpacing(10)
+        dl_row.addWidget(self._make_label(""))
+
+        dl_btn = QPushButton("下载服务端加载器（Paper / Fabric / Forge…）")
+        dl_btn.setObjectName("Ghost")
+        dl_btn.setFixedHeight(36)
+        dl_btn.clicked.connect(self._open_server_setup)
+        dl_row.addWidget(dl_btn, 1)
+        b1.addLayout(dl_row)
+
         self.e_java = self._path_row(b1, "Java 路径", "file")
         self.e_xmx = self._entry_row(b1, "最大内存 (-Xmx)",
                                      placeholder="如 4G")
@@ -225,6 +257,13 @@ class SettingsPage(BasePage):
         bl.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
+
+    def _open_server_setup(self):
+        from ui_qt.dialogs.server_setup import ServerSetupDialog
+        dlg = ServerSetupDialog(self.state, self)
+        if dlg.exec():
+            # 刷新服务器目录输入框（用户可能装到了新目录）
+            self._reload()
 
     # ========================================================
     #  表单组件
@@ -458,3 +497,14 @@ class SettingsPage(BasePage):
                     f"background: transparent;"))
 
         threading.Thread(target=worker, daemon=True).start()
+    def _on_server_list_changed(self):
+        """服务器列表变化时，刷新主窗口侧边栏的选择器。"""
+        # 通过父窗口刷新
+        try:
+            main = self.window()
+            if hasattr(main, "_server_selector"):
+                main._server_selector.reload()
+        except Exception:
+            pass
+        # 重新加载本页
+        self._reload()

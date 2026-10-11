@@ -1,6 +1,9 @@
 """全局应用状态：封装 core 模块 + Qt 信号槽。"""
 import json as _json
+import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -15,6 +18,7 @@ from core.permissions import (
 )
 from core.log_watcher import LogWatcher
 from core import process_manager as pm
+from core.process_manager import set_state_dir as set_pm_dir
 from core import server_registry as registry
 from core import paths
 from core.ai_client import AIClient
@@ -30,7 +34,6 @@ from core.clean_zones import (
     load_clean_zones, save_clean_zones, build_clean_zone_command,
     set_data_dir as set_clean_dir,
 )
-
 
 # ============================================================
 #  异步 RCON 执行器
@@ -55,7 +58,6 @@ class RconWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
-
 # ============================================================
 #  AppState
 # ============================================================
@@ -70,6 +72,8 @@ class AppState(QObject):
     rcon_disconnected = Signal()
     theme_changed = Signal(str)
     stats_updated = Signal(dict)
+    server_switched = Signal(str)      # 服务器切换完成，附带 server_id
+    backup_finished = Signal()          # 备份完成（成功或失败）
 
     def __init__(self):
         super().__init__()
@@ -99,6 +103,7 @@ class AppState(QObject):
         set_zones_dir(self.data_dir)
         set_clean_dir(self.data_dir)
         set_hist_dir(self.data_dir)
+        set_pm_dir(self.data_dir)              # ★ 进程状态文件也隔离
 
         # ====================================================
         #  3. 运行状态
@@ -117,6 +122,8 @@ class AppState(QObject):
         self._log_watcher = None
         self._workers = []
         self._scheduler_stop = threading.Event()
+        self._session_token = 0                # ★ 切换时自增，让旧线程失效
+        self._switching = False                # ★ 切换中标志
 
         # ====================================================
         #  4. core 模块
@@ -207,7 +214,6 @@ class AppState(QObject):
                          daemon=True).start()
 
     def _start_server_worker(self):
-        """外壳：捕获所有异常，保证信号始终发出。"""
         try:
             self._do_start_server()
         except Exception as e:
@@ -219,13 +225,13 @@ class AppState(QObject):
                     self.log(f"  {line}", "error")
             except Exception:
                 pass
-            # ★ 无论如何要复位 UI
             self.server_stopped.emit()
 
     def _do_start_server(self):
-        """实际启动逻辑。"""
-        # ---- 1. 检查是否有已运行的服务端 ----
-        existing = pm.find_running_server(self.server_path)
+        """实际启动逻辑（支持 jar / run.bat / run.sh 三种方式）。"""
+        # ---- 1. 已有实例？接管 ----
+        existing = (pm.find_running_server(self.server_path)
+                    or pm.find_running_java_by_cwd(self.server_path))
         if existing:
             self.log(
                 f"检测到已在运行的服务端（PID {existing['pid']}），正在接管…",
@@ -233,7 +239,7 @@ class AppState(QObject):
             self._take_over(existing)
             return
 
-        # ---- 2. 校验 Java 和 jar ----
+        # ---- 2. 校验 Java ----
         java_path = Path(self.config_data.get("java_path", ""))
         if not java_path.exists():
             self.log(f"找不到 Java：{java_path}", "error")
@@ -245,78 +251,123 @@ class AppState(QObject):
             self.server_stopped.emit()
             return
 
-        try:
-            jars = sorted(self.server_path.glob("*.jar"))
-        except Exception as e:
-            self.log(f"扫描 jar 失败：{e}", "error")
+        # ---- 3. 检测启动方式 ----
+        startup = pm.detect_startup_method(self.server_path)
+        if startup is None:
+            self.log(
+                "找不到启动文件。\n"
+                "  支持的启动方式：\n"
+                "    · run.bat / run.sh（Forge 1.17+ / NeoForge）\n"
+                "    · *.jar（Paper / Purpur / Fabric / 原版）",
+                "error")
             self.server_stopped.emit()
             return
 
-        if not jars:
-            self.log("未找到 .jar 文件", "error")
-            self.server_stopped.emit()
-            return
+        method_type, target = startup
 
-        jar = jars[0]
         xmx = self.config_data.get("memory_xmx", "4G")
         xms = self.config_data.get("memory_xms", "2G")
         extra = self.config_data.get("jvm_args", "").strip()
 
-        cmd = [str(java_path), f"-Xmx{xmx}", f"-Xms{xms}"]
-        if extra:
-            cmd += extra.split()
-        cmd += ["-jar", jar.name, "nogui"]
+        # ---- 4. 组装命令 ----
+        env = os.environ.copy()
+        java_dir = str(java_path.parent)
+        env["PATH"] = java_dir + os.pathsep + env.get("PATH", "")
 
-        self.log(f"启动服务端：{jar.name}  Xmx={xmx} Xms={xms}", "info")
+        if method_type == "bat":
+            self.log(f"使用启动脚本：{target.name}", "info")
+            cmd = ["cmd", "/c", str(target), "nogui"]
+            uses_script = True
+        elif method_type == "sh":
+            self.log(f"使用启动脚本：{target.name}", "info")
+            cmd = ["bash", str(target), "nogui"]
+            uses_script = True
+        else:
+            self.log(f"使用 JAR 启动：{target.name}", "info")
+            cmd = [str(java_path), f"-Xmx{xmx}", f"-Xms{xms}"]
+            if extra:
+                cmd += extra.split()
+            cmd += ["-jar", str(target), "nogui"]
+            uses_script = False
 
-        # ---- 3. 启动进程 ----
+        # ---- 5. 启动进程 ----
         try:
-            proc = pm.launch_detached(cmd, self.server_path)
+            flags = (subprocess.CREATE_NEW_PROCESS_GROUP
+                     if sys.platform == "win32" else 0)
+            self.process = subprocess.Popen(
+                cmd,
+                cwd=str(self.server_path),
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=0,
+                creationflags=flags,
+            )
         except Exception as e:
             self.log(f"启动失败：{e}", "error")
             self.server_stopped.emit()
             return
 
-        # ---- 4. 记录状态 ----
+        # ---- 6. 记录状态 ----
         time.sleep(0.3)
-        try:
-            ct = pm.get_create_time(proc.pid) or time.time()
-        except Exception:
-            ct = time.time()
-
-        self._server_pid = proc.pid
+        ct = pm.get_create_time(self.process.pid) or time.time()
+        self._server_pid = self.process.pid
         self._server_create_time = ct
-        self._is_external = False
         self.is_running = True
         self.start_time = time.time()
         self._user_stopping = False
 
-        try:
-            pm.save_state({
-                "pid": proc.pid,
-                "create_time": ct,
-                "start_time": self.start_time,
-            })
-        except Exception:
-            pass
+        pm.save_state({
+            "pid": self.process.pid,
+            "create_time": ct,
+            "start_time": self.start_time,
+        })
 
-        # ---- 5. ★ 立即发信号：UI 马上切"运行中" ----
         self.server_started.emit()
 
-        # ---- 6. 启动日志监控 ----
+        # ---- 7. 脚本启动时，后台扫描真正的 java 进程 ----
+        if uses_script:
+            token = self._session_token
+
+            def _find_java_async():
+                for _ in range(15):
+                    time.sleep(1)
+                    if (not self.is_running
+                            or token != self._session_token):
+                        return
+                    running = pm.find_running_java_by_cwd(
+                        self.server_path)
+                    if running:
+                        self._server_pid = running["pid"]
+                        self._server_create_time = (
+                                running.get("create_time") or 0.0)
+                        pm.save_state({
+                            "pid": self._server_pid,
+                            "create_time": self._server_create_time,
+                            "start_time": self.start_time,
+                        })
+                        self.log(
+                            f"已捕获服务端 Java 进程 "
+                            f"PID={self._server_pid}", "info")
+                        return
+                self.log("未捕获到 Java 子进程（可能仍在启动中）", "warn")
+
+            threading.Thread(target=_find_java_async, daemon=True).start()
+
+        # ---- 8. 日志、进程监控、RCON ----
         try:
             self._start_log_watcher()
         except Exception as e:
             self.log(f"日志监控启动失败：{e}", "warn")
 
-        # ---- 7. 启动进程监控 ----
+        token = self._session_token
         try:
             threading.Thread(target=self._watch_process,
-                             daemon=True).start()
+                             args=(token,), daemon=True).start()
         except Exception:
             pass
 
-        # ---- 8. RCON 连接放到独立线程，避免阻塞启动流程 ----
         try:
             threading.Thread(target=self._connect_rcon_delayed,
                              daemon=True).start()
@@ -324,7 +375,6 @@ class AppState(QObject):
             pass
 
     def _connect_rcon_delayed(self):
-        """等 RCON 就绪后连接（独立线程）。"""
         try:
             self._wait_rcon_ready(timeout=90)
         except Exception:
@@ -334,12 +384,19 @@ class AppState(QObject):
         except Exception as e:
             self.log(f"RCON 连接线程出错：{e}", "warn")
 
-    def _take_over(self, existing):
+    def _take_over(self, existing, token=None):
+        """接管已有服务端进程。token 用于校验会话是否有效。"""
+        if token is None:
+            token = self._session_token
+        if token != self._session_token:
+            return
+
         self._server_pid = existing["pid"]
         self._server_create_time = existing.get("create_time") or 0.0
         self._is_external = True
         self.is_running = True
-        self.start_time = time.time()
+        if not self.start_time:
+            self.start_time = time.time()
 
         try:
             pm.save_state({
@@ -365,30 +422,54 @@ class AppState(QObject):
 
         try:
             threading.Thread(target=self._watch_process,
-                             daemon=True).start()
+                             args=(token,), daemon=True).start()
         except Exception:
             pass
 
-    def _detect_running_server(self):
-        try:
-            running = pm.find_running_server(self.server_path)
-        except Exception:
-            running = None
-
-        if not running:
-            try:
-                pm.clear_state()
-            except Exception:
-                pass
+    def _detect_running_server(self, token=None):
+        """优先读状态文件，兜底进程扫描。"""
+        if token is None:
+            token = self._session_token
+        if token != self._session_token:
             return
 
+        # ---- 1. 状态文件 ----
+        state = pm.load_state()
+        pid = state.get("pid")
+        create_time = state.get("create_time")
+        saved_start = state.get("start_time")
+
+        if pid and pm.is_process_alive(pid, create_time):
+            running = (pm.find_running_java_by_cwd(self.server_path)
+                       or pm.find_running_server(self.server_path))
+            if running and running["pid"] == pid:
+                self.log(
+                    f"检测到服务器已在运行"
+                    f"（PID {pid}，来自状态文件），正在接管…", "info")
+                if saved_start:
+                    self.start_time = saved_start
+                self._take_over({
+                    "pid": pid,
+                    "create_time": create_time,
+                }, token=token)
+                return
+
+        # ---- 2. 状态文件失效 ----
         try:
-            self.log(
-                f"检测到已在运行的服务端（PID {running['pid']}），正在接管…",
-                "info")
-            self._take_over(running)
-        except Exception as e:
-            self.log(f"接管失败：{e}", "warn")
+            pm.clear_state()
+        except Exception:
+            pass
+
+        # ---- 3. 进程扫描 ----
+        running = (pm.find_running_java_by_cwd(self.server_path)
+                   or pm.find_running_server(self.server_path))
+        if not running:
+            return
+
+        self.log(
+            f"检测到服务器已在运行"
+            f"（PID {running['pid']}，来自进程扫描），正在接管…", "info")
+        self._take_over(running, token=token)
 
     # ========================================================
     #  服务器停止
@@ -410,7 +491,6 @@ class AppState(QObject):
             self._on_server_exited()
 
     def _do_stop_server(self):
-        # 优先用 RCON 优雅停止
         if self.rcon_client and self.rcon_client.connected:
             try:
                 self.rcon_client.command("stop")
@@ -427,15 +507,43 @@ class AppState(QObject):
 
         self._on_server_exited()
 
-    def _watch_process(self):
-        while self.is_running:
-            if not pm.is_process_alive(self._server_pid,
-                                        self._server_create_time):
-                self._on_server_exited()
-                return
-            time.sleep(2)
+    def _watch_process(self, token=None):
+        """
+        监控服务端存活。
+        token 用于切换服务器后自动失效，避免误触发新服务器的状态。
+        """
+        if token is None:
+            token = self._session_token
 
-    def _on_server_exited(self):
+        time.sleep(5)
+
+        while self.is_running and token == self._session_token:
+            running = pm.find_running_java_by_cwd(self.server_path)
+            if running:
+                self._server_pid = running["pid"]
+                self._server_create_time = (
+                        running.get("create_time") or 0.0)
+                time.sleep(2)
+                continue
+
+            time.sleep(3)
+            if token != self._session_token:
+                return
+            if pm.find_running_java_by_cwd(self.server_path):
+                time.sleep(2)
+                continue
+
+            if token == self._session_token:
+                self._on_server_exited(token)
+            return
+
+    def _on_server_exited(self, token=None):
+        if token is None:
+            token = self._session_token
+        # ★ 切换服务器后，旧线程的收尾请求全部作废
+        if token != self._session_token:
+            return
+
         if (not self.is_running and self._server_pid is None
                 and self.start_time is None):
             return
@@ -483,7 +591,8 @@ class AppState(QObject):
 
             def _restart():
                 time.sleep(5)
-                if not self.is_running:
+                # ★ 重启前校验 token，避免切换后误重启
+                if not self.is_running and token == self._session_token:
                     self.start_server()
             threading.Thread(target=_restart, daemon=True).start()
 
@@ -491,7 +600,6 @@ class AppState(QObject):
     #  RCON 连接
     # ========================================================
     def _wait_rcon_ready(self, timeout=60):
-        """轮询服务端日志，等到 RCON 监听器启动再返回。"""
         log_path = self.server_path / "logs" / "latest.log"
         start = time.time()
         while time.time() - start < timeout:
@@ -884,11 +992,13 @@ class AppState(QObject):
                         self._last_auto_backup = time.time()
                         self.log("触发自动备份", "info")
                         self.do_backup(wait=True)
+                        # ★ 修改点：传入 backup_dir
                         rotate_backups(
                             self.server_path,
                             int(self.config_data.get(
                                 "auto_backup_keep", 10)),
                             self.log,
+                            backup_dir=self.data_dir / "backups"
                         )
 
                 if (self.config_data.get("global_clean_enabled")
@@ -1010,22 +1120,26 @@ class AppState(QObject):
         if self._backup_running:
             self.log("已有备份正在进行", "warn")
             return
+
+        # ★ 获取当前服务器的专属备份目录
+        backup_dir = self.data_dir / "backups"
+
         if wait:
-            self._backup_worker()
+            self._backup_worker(backup_dir)
         else:
             threading.Thread(target=self._backup_worker,
-                             daemon=True).start()
+                             args=(backup_dir,), daemon=True).start()
 
-    def _backup_worker(self):
+    def _backup_worker(self, backup_dir):
         if self._backup_running:
             return
         self._backup_running = True
         try:
             perform_backup(
-                self.server_path, self.rcon_client, self.log)
+                self.server_path, self.rcon_client, self.log, backup_dir=backup_dir)
         finally:
             self._backup_running = False
-
+            self.backup_finished.emit()  # ★ 通知 UI 刷新
     # ========================================================
     #  手动清理
     # ========================================================
@@ -1064,7 +1178,6 @@ class AppState(QObject):
     #  配置保存
     # ========================================================
     def save_config(self):
-        """保存当前服务器配置到注册表。"""
         if registry.update_server(
                 self.server_id,
                 name=self.current_server.get("name"),
@@ -1090,75 +1203,188 @@ class AppState(QObject):
     #  多服务器切换
     # ========================================================
     def switch_server(self, server_id):
-        """切换到指定服务器（不影响正在运行的服务端进程）。"""
+        """
+        切换到指定服务器。
+
+        行为约定：
+        - 原服务端进程继续运行（管理器只断开连接，不停止进程）
+        - 状态文件按服务器独立保存（切回来能秒接管）
+        - session token 让旧的监控线程自动失效
+        """
         if server_id == self.server_id:
+            return False
+        if self._switching:
             return False
 
         server = registry.get_server(server_id)
         if server is None:
             return False
 
-        # 保存当前配置
-        registry.update_server(
-            self.server_id,
-            name=self.current_server.get("name"),
-            config=self.config_data,
-        )
-
-        # 断开 RCON / 日志监控
-        if self.rcon_client:
-            try:
-                self.rcon_client.disconnect()
-            except Exception:
-                pass
-            self.rcon_client = None
-
-        if self._log_watcher:
-            try:
-                self._log_watcher.stop()
-            except Exception:
-                pass
-            self._log_watcher = None
-
-        # 切换数据目录
-        registry.set_active(server_id)
-        self.server_id = server_id
-        self.current_server = server
-        self.config_data = dict(server["config"])
-        self.server_path = Path(
-            self.config_data.get("server_path", "."))
-
-        self.data_dir = registry.get_data_dir(server_id)
-        set_perm_dir(self.data_dir)
-        set_zones_dir(self.data_dir)
-        set_clean_dir(self.data_dir)
-        set_hist_dir(self.data_dir)
-
-        # 重新加载数据
-        self.perm_data = load_permissions()
-        self.perm_manager.update_data(self.perm_data)
-        self.zones_data = load_zones()
-        self.clean_zones_data = load_clean_zones()
-        self.ai_history = AIHistory()
-
-        # 清空运行状态
-        self.is_running = False
-        self.start_time = None
-        self._server_pid = None
-        self._server_create_time = None
-        self._is_external = False
-
+        self._switching = True
         try:
-            self.server_context.invalidate()
-        except Exception:
-            pass
+            # =============================================
+            #  1. 保存当前服务器配置
+            # =============================================
+            try:
+                registry.update_server(
+                    self.server_id,
+                    name=self.current_server.get("name"),
+                    config=self.config_data,
+                )
+            except Exception:
+                pass
 
-        # 检测新服务器是否有在跑的实例
-        threading.Thread(target=self._detect_running_server,
-                         daemon=True).start()
+            # =============================================
+            #  2. 原服务器在运行：保存状态文件 + 断开连接
+            # =============================================
+            if self.is_running and self._server_pid:
+                try:
+                    pm.save_state({
+                        "pid": self._server_pid,
+                        "create_time": self._server_create_time,
+                        "start_time": self.start_time,
+                    })
+                    self.log(
+                        f"已保存服务器运行状态"
+                        f"（PID {self._server_pid}）", "info")
+                except Exception as e:
+                    self.log(f"保存状态失败：{e}", "warn")
 
-        self.log(
-            f"已切换到服务器："
-            f"{self.current_server.get('name', server_id)}",
-            "ok")
-        return True
+            # ★ session token 自增 → 旧 _watch_process 线程自动失效
+            self._session_token += 1
+
+            if self.rcon_client:
+                try:
+                    self.rcon_client.disconnect()
+                except Exception:
+                    pass
+                self.rcon_client = None
+
+            if self._log_watcher:
+                try:
+                    self._log_watcher.stop()
+                except Exception:
+                    pass
+                self._log_watcher = None
+
+            self.is_running = False
+            self.start_time = None
+            self._server_pid = None
+            self._server_create_time = None
+            self._is_external = False
+            self._user_stopping = False
+
+            try:
+                self.server_context.invalidate()
+            except Exception:
+                pass
+
+            # =============================================
+            #  3. 切换数据目录（含进程状态文件目录）
+            # =============================================
+            try:
+                registry.set_active(server_id)
+            except Exception:
+                pass
+
+            self.server_id = server_id
+            self.current_server = server
+            self.config_data = dict(server["config"])
+            self.server_path = Path(
+                self.config_data.get("server_path", "."))
+
+            try:
+                self.data_dir = registry.get_data_dir(server_id)
+                set_perm_dir(self.data_dir)
+                set_zones_dir(self.data_dir)
+                set_clean_dir(self.data_dir)
+                set_hist_dir(self.data_dir)
+                set_pm_dir(self.data_dir)      # ★ 状态目录也切
+            except Exception:
+                pass
+
+            # =============================================
+            #  4. 重新加载数据
+            # =============================================
+            try:
+                self.perm_data = load_permissions()
+                self.perm_manager.update_data(self.perm_data)
+                try:
+                    self.perm_manager._violations.clear()
+                except Exception:
+                    pass
+                self.zones_data = load_zones()
+                self.clean_zones_data = load_clean_zones()
+                self.ai_history = AIHistory()
+            except Exception as e:
+                self.log(f"加载新服务器数据失败：{e}", "warn")
+
+            self._last_ai_call_time = 0.0
+            self._last_ai_call_per_player = {}
+
+            # =============================================
+            #  5. 通知 UI 复位到"离线"
+            # =============================================
+            self.server_stopped.emit()
+            self.server_switched.emit(server_id)
+
+            # =============================================
+            #  6. 后台检测新服务器目录下是否有在跑的实例
+            # =============================================
+            token = self._session_token
+
+            def _detect_async():
+                time.sleep(0.3)
+                try:
+                    self._detect_running_server(token=token)
+                except Exception as e:
+                    self.log(f"检测新服务器失败：{e}", "warn")
+
+            threading.Thread(target=_detect_async, daemon=True).start()
+
+            self.log(
+                f"已切换到服务器："
+                f"{self.current_server.get('name', server_id)}", "ok")
+            return True
+        finally:
+            self._switching = False
+
+    # ========================================================
+    #  多服务器管理扩展
+    # ========================================================
+    def add_new_server(self, name, server_path="", java_path=""):
+        """创建一个新服务器。返回新 server_id 或 None。"""
+        try:
+            from core.config import DEFAULT_CONFIG
+            cfg = dict(DEFAULT_CONFIG)
+            if server_path:
+                cfg["server_path"] = server_path
+            if java_path:
+                cfg["java_path"] = java_path
+
+            sid = registry.add_server(name, cfg)
+            self.log(f"已创建服务器：{name}", "ok")
+            return sid
+        except Exception as e:
+            self.log(f"创建服务器失败：{e}", "error")
+            return None
+
+    def request_switch_server(self, server_id):
+        """UI 触发的切换请求：会先弹确认框（如果服务端在运行）。"""
+        if server_id == self.server_id:
+            return
+
+        if self.is_running:
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                None, "切换服务器",
+                "当前服务器正在运行。\n\n"
+                "切换后管理器会与它断开连接（服务端进程不受影响），\n"
+                "你可以稍后切回来继续管理。\n\n"
+                "继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes)
+            if reply != QMessageBox.Yes:
+                return
+
+        self.switch_server(server_id)

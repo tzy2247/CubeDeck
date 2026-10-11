@@ -40,6 +40,7 @@ class BackupPage(BasePage):
         super().__init__(state, parent)
         self._size_workers = []
         self._build()
+        state.backup_finished.connect(self.refresh)
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -113,7 +114,8 @@ class BackupPage(BasePage):
     def refresh(self):
         self._clear_list()
 
-        root = self.state.server_path.parent / "backups"
+        # ★ 修改点：从 state.data_dir 读取备份目录
+        root = self.state.data_dir / "backups"
         if not root.exists():
             self._show_empty("备份目录不存在")
             return
@@ -248,7 +250,8 @@ class BackupPage(BasePage):
         return item
 
     def _open_root_folder(self):
-        root = self.state.server_path.parent / "backups"
+        # ★ 修改点：从 state.data_dir 读取备份目录
+        root = self.state.data_dir / "backups"
         if not root.exists():
             QMessageBox.information(self, "提示", "备份目录还不存在")
             return

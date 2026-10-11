@@ -3,6 +3,7 @@
 相比 urllib，requests 的 HTTP 头更完整、TLS 兼容性更好，
 能绕过 urllib 常见的 RemoteDisconnected 问题。
 """
+import json
 import time
 from pathlib import Path
 
@@ -14,16 +15,18 @@ except ImportError:
 
 
 # ============================================================
-#  镜像站列表
+#  镜像站列表（按优先级）
 # ============================================================
 MIRRORS = [
-    ("MCIM 国内镜像",  "https://mod.mcimirror.top/modrinth/v2"),
-    ("官方 API",       "https://api.modrinth.com/v2"),
+    ("镜像A",  "https://mod.mcimirror.top/modrinth/v2"),
 ]
 
 DEFAULT_API_BASE = MIRRORS[0][1]
+
 USER_AGENT = "CubeDeck/0.1.0"
-DEFAULT_TIMEOUT = 30
+
+DEFAULT_TIMEOUT = 120
+MAX_DEBUG_LEN = 500
 
 
 class ModrinthClient:
@@ -47,12 +50,12 @@ class ModrinthClient:
         # ---- requests session ----
         self.session = requests.Session()
 
-        # 完整的浏览器风格 header，避免被中间层拒绝
+        # 完整的浏览器风格 header
         self.session.headers.update({
             "User-Agent": self.user_agent,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": "gzip, deflate",
             "Connection": "keep-alive",
         })
 
@@ -71,11 +74,10 @@ class ModrinthClient:
             except Exception:
                 pass
 
-        # 挂载 adapter：开启连接池和 keep-alive
         adapter = HTTPAdapter(
             pool_connections=4,
             pool_maxsize=8,
-            max_retries=0,   # 我们手动重试
+            max_retries=0,
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
@@ -87,8 +89,46 @@ class ModrinthClient:
         url = f"{base_url}{path}"
         resp = self.session.get(
             url, params=params, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+
+        # 先看 HTTP 状态
+        if resp.status_code >= 400:
+            # 拿一段响应体帮助诊断
+            body = self._extract_body(resp)
+            raise requests.exceptions.HTTPError(
+                f"HTTP {resp.status_code}: {body}",
+                response=resp)
+
+        # ★ 关键：检测非 JSON 响应
+        text = resp.text
+        if not text or not text.strip():
+            raise RuntimeError(
+                f"服务器返回空响应\n"
+                f"  URL: {url}\n"
+                f"  Content-Type: "
+                f"{resp.headers.get('Content-Type', '(无)')}\n"
+                f"  可能原因：镜像故障、反爬拦截、响应被中间层清空")
+
+        ctype = resp.headers.get("Content-Type", "")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # 不是 JSON，把原文带出来
+            preview = text[:MAX_DEBUG_LEN].replace("\n", " ")
+            raise RuntimeError(
+                f"响应不是合法 JSON\n"
+                f"  URL: {url}\n"
+                f"  Content-Type: {ctype}\n"
+                f"  内容预览: {preview}")
+
+    @staticmethod
+    def _extract_body(resp, limit=MAX_DEBUG_LEN):
+        """从响应里提取一段可读文本用于诊断。"""
+        try:
+            text = resp.text or ""
+        except Exception:
+            return "(无法读取响应体)"
+        text = text.strip().replace("\n", " ")
+        return text[:limit] if text else "(空)"
 
     def _request(self, path, params=None):
         last_error = None
@@ -102,8 +142,10 @@ class ModrinthClient:
 
                 except requests.exceptions.HTTPError as e:
                     code = e.response.status_code if e.response is not None else 0
-                    last_error = self._format_http_error(code, name)
-                    if code in (403, 404, 401):
+                    body = self._extract_body(e.response) if e.response else ""
+                    last_error = self._format_http_error(code, name, body)
+                    # 4xx 不重试，直接换镜像
+                    if 400 <= code < 500:
                         break
                     if attempt < self.max_retries:
                         time.sleep(1.0 * (attempt + 1))
@@ -116,7 +158,7 @@ class ModrinthClient:
 
                 except requests.exceptions.ProxyError as e:
                     last_error = (f"[{name}] 代理错误：{e}\n"
-                                  f"  请检查代理地址和端口是否正确。")
+                                  f"  请检查代理地址和端口。")
                     break
 
                 except requests.exceptions.ConnectionError as e:
@@ -127,10 +169,16 @@ class ModrinthClient:
                     break
 
                 except requests.exceptions.Timeout:
-                    last_error = f"[{name}] 请求超时（{self.timeout} 秒）"
+                    last_error = f"[{name}] 请求超时（{self.timeout}s）"
                     if attempt < self.max_retries:
                         time.sleep(1.0 * (attempt + 1))
                         continue
+                    break
+
+                except RuntimeError as e:
+                    # 来自 _request_once 的 JSON 解析 / 空响应错误
+                    last_error = f"[{name}] {e}"
+                    # 不重试，直接下一个镜像
                     break
 
                 except Exception as e:
@@ -140,30 +188,32 @@ class ModrinthClient:
                         continue
                     break
 
+            # 尝试下一个镜像
             if not self.auto_fallback:
                 break
-            if idx + 1 < len(self.mirrors):
-                if last_error and ("403" in last_error or "404" in last_error):
-                    break
 
-        raise RuntimeError(last_error or "请求失败，所有镜像均不可用")
+        raise RuntimeError(last_error or "所有镜像均不可用")
 
     # ========================================================
     #  错误格式化
     # ========================================================
     @staticmethod
-    def _format_http_error(code, name):
+    def _format_http_error(code, name, body=""):
+        snippet = f"\n  {body[:200]}" if body else ""
+
         if code == 403:
             return (f"[{name}] 403 权限拒绝\n"
                     f"  1. User-Agent 可能不在镜像白名单\n"
-                    f"  2. 请求频率过高被限流")
+                    f"  2. 请求频率过高被限流"
+                    f"{snippet}")
         if code == 404:
-            return f"[{name}] 404 接口不存在，请检查 API 地址"
+            return f"[{name}] 404 接口不存在{snippet}"
         if code == 429:
             return f"[{name}] 429 请求过频繁，请稍后重试"
         if code >= 500:
-            return f"[{name}] 服务器错误 {code}，镜像可能故障"
-        return f"[{name}] HTTP {code}"
+            return (f"[{name}] 服务器错误 {code}，镜像可能故障"
+                    f"{snippet}")
+        return f"[{name}] HTTP {code}{snippet}"
 
     @staticmethod
     def _format_connection_error(e, name):
@@ -171,12 +221,9 @@ class ModrinthClient:
         low = msg.lower()
 
         if "remote end closed" in low or "connection aborted" in low:
-            return (f"[{name}] 服务器主动关闭连接\n"
-                    f"  1. User-Agent 可能被拒\n"
-                    f"  2. 请求头不完整\n"
-                    f"  3. 镜像临时故障")
+            return f"[{name}] 服务器主动关闭连接"
         if "timed out" in low:
-            return f"[{name}] 连接超时，网络不通或镜像故障"
+            return f"[{name}] 连接超时"
         if "connection refused" in low:
             return f"[{name}] 连接被拒绝，镜像可能已下线"
         if "name or service not known" in low:
@@ -207,7 +254,6 @@ class ModrinthClient:
             "index": index,
         }
         if facets:
-            import json
             params["facets"] = json.dumps(facets)
 
         return self._request("/search", params)

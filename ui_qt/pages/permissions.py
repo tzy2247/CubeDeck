@@ -24,10 +24,13 @@ class PermissionsPage(BasePage):
         self._selected_player = None
         self._check_vars = {}
 
-        # 分帧渲染状态
-        self._pending_cmds = []       # [(name, desc, level), ...]
+        self._pending_cmds = []
         self._cmd_index = 0
         self._render_timer = None
+
+        self._level_boxes = {}
+        self._level_overrides = {}
+        self._bulk_state = None
 
         self._build()
 
@@ -91,7 +94,7 @@ class PermissionsPage(BasePage):
         refresh_btn = QPushButton("刷新玩家")
         refresh_btn.setObjectName("Ghost")
         refresh_btn.setFixedHeight(36)
-        refresh_btn.clicked.connect(self._load_players)
+        refresh_btn.clicked.connect(self._on_refresh_clicked)
         row2.addWidget(refresh_btn)
         row2.addStretch()
 
@@ -128,11 +131,33 @@ class PermissionsPage(BasePage):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(16, 14, 16, 14)
 
+        header_row = QHBoxLayout()
+        header_row.setSpacing(6)
+
         self._cmd_header = QLabel("允许的命令")
         self._cmd_header.setStyleSheet(
             f"color: {theme.c('text')}; font-weight: bold; "
             f"background: transparent;")
-        rl.addWidget(self._cmd_header)
+        header_row.addWidget(self._cmd_header)
+        header_row.addStretch()
+
+        self._select_all_btn = QPushButton("全选")
+        self._select_all_btn.setObjectName("Ghost")
+        self._select_all_btn.setFixedHeight(28)
+        self._select_all_btn.setMinimumWidth(60)
+        self._select_all_btn.setProperty("action", "select_all")
+        self._select_all_btn.clicked.connect(self._on_action_button)
+        header_row.addWidget(self._select_all_btn)
+
+        self._unselect_all_btn = QPushButton("全不选")
+        self._unselect_all_btn.setObjectName("Ghost")
+        self._unselect_all_btn.setFixedHeight(28)
+        self._unselect_all_btn.setMinimumWidth(70)
+        self._unselect_all_btn.setProperty("action", "unselect_all")
+        self._unselect_all_btn.clicked.connect(self._on_action_button)
+        header_row.addWidget(self._unselect_all_btn)
+
+        rl.addLayout(header_row)
 
         cmd_scroll = QScrollArea()
         cmd_scroll.setWidgetResizable(True)
@@ -187,6 +212,39 @@ class PermissionsPage(BasePage):
         return lbl
 
     # ========================================================
+    #  统一按钮事件
+    # ========================================================
+    def _on_action_button(self, checked=False):
+        try:
+            sender = self.sender()
+            if sender is None:
+                return
+
+            action = sender.property("action")
+            level = sender.property("level")
+
+            if action == "select_all":
+                self._select_all()
+            elif action == "unselect_all":
+                self._unselect_all()
+            elif action == "level_select":
+                self._select_level(level, True)
+            elif action == "level_unselect":
+                self._select_level(level, False)
+        except Exception:
+            import traceback
+            QMessageBox.critical(
+                self, "按钮事件出错", traceback.format_exc())
+
+    def _on_refresh_clicked(self, checked=False):
+        try:
+            self._load_players()
+        except Exception:
+            import traceback
+            QMessageBox.critical(self, "刷新出错",
+                                 traceback.format_exc())
+
+    # ========================================================
     #  策略
     # ========================================================
     def _load_policy(self):
@@ -200,7 +258,7 @@ class PermissionsPage(BasePage):
         self._kick_edit.setText(str(d.get("violations_to_kick", 3)))
         self._ban_edit.setText(str(d.get("violations_to_ban", 10)))
 
-    def _save_policy(self):
+    def _save_policy(self, checked=False):
         try:
             window = int(self._window_edit.text())
             kick = int(self._kick_edit.text())
@@ -221,32 +279,27 @@ class PermissionsPage(BasePage):
             self._policy_status.setText("已保存")
 
     # ========================================================
-    #  玩家列表（异步加载 RCON）
+    #  玩家列表
     # ========================================================
     def _load_players(self):
-        """显示所有已知玩家 + 已授权玩家 + 白名单 + RCON 在线玩家。"""
         self._player_list.clear()
         shown = set()
 
-        # 1. 已知玩家（所有执行过命令的，包括违规者）
         for name in self.state.perm_data.get("known_players", []):
             if name not in shown:
                 self._add_player_item(name)
                 shown.add(name)
 
-        # 2. 已授权的玩家
         for name in self.state.perm_data.get("players", {}).keys():
             if name not in shown:
                 self._add_player_item(name)
                 shown.add(name)
 
-        # 3. 白名单玩家
         for name in self.state.perm_data.get("whitelist_players", []):
             if name not in shown:
                 self._add_player_item(name)
                 shown.add(name)
 
-        # 4. ★ 同步获取 RCON 在线玩家（list 命令响应很快）
         if (self.state.rcon_client
                 and self.state.rcon_client.connected):
             try:
@@ -259,18 +312,16 @@ class PermissionsPage(BasePage):
 
                 if online_names:
                     self.state.log(
-                        f"RCON 返回在线玩家：{online_names}", "info")
+                        f"RCON 在线玩家：{', '.join(online_names)}",
+                        "info")
             except Exception as e:
                 self.state.log(f"获取在线玩家失败：{e}", "warn")
 
     @staticmethod
     def _parse_list_response(resp: str):
-        """从 RCON 'list' 响应里解析玩家名。"""
         import re as _re
-        # 去掉颜色代码 §x
         clean = _re.sub(r"§.", "", resp)
 
-        # 标准格式：There are N of a max of M players online: a, b, c
         if ":" not in clean:
             return []
         tail = clean.split(":", 1)[1].strip()
@@ -291,15 +342,13 @@ class PermissionsPage(BasePage):
         self._player_list.addItem(item)
 
     # ========================================================
-    #  选中玩家 → 渲染命令列表
+    #  选中玩家 → 渲染命令
     # ========================================================
     def _on_player_selected(self, item):
         self._selected_player = item.data(Qt.UserRole)
         self._start_render_commands()
 
     def _start_render_commands(self):
-        """清空旧控件 + 分帧渲染新控件。"""
-        # 停掉上一次的分帧渲染
         if self._render_timer:
             try:
                 self._render_timer.stop()
@@ -307,7 +356,6 @@ class PermissionsPage(BasePage):
                 pass
             self._render_timer = None
 
-        # 清空
         while self._cmd_body_layout.count():
             it = self._cmd_body_layout.takeAt(0)
             w = it.widget()
@@ -315,6 +363,9 @@ class PermissionsPage(BasePage):
                 w.deleteLater()
 
         self._check_vars.clear()
+        self._level_boxes.clear()
+        self._level_overrides.clear()
+        self._bulk_state = None
 
         player = self._selected_player
         if not player:
@@ -325,66 +376,178 @@ class PermissionsPage(BasePage):
         server_ver = self.state.server_info.version
         cmds_by_level = get_commands_for_version(server_ver)
 
-        # 铺平所有命令，带上等级
         self._pending_cmds = []
         for level in sorted(cmds_by_level.keys()):
-            self._pending_cmds.append(("__level__", level, None))
+            # ★ 元组结构是 (name, desc, level)
+            #    等级标记行：name="__level__", desc=None, level=真实等级
+            self._pending_cmds.append(("__level__", None, level))
             for cmd_name, desc in cmds_by_level[level]:
                 self._pending_cmds.append((cmd_name, desc, level))
 
         self._allowed = allowed
         self._cmd_index = 0
-
-        # 分帧渲染：每次 8 个
         self._render_chunk()
 
     def _render_chunk(self, batch=8):
         if self._cmd_index >= len(self._pending_cmds):
             self._cmd_body_layout.addStretch()
             self._render_timer = None
+            self._bulk_state = None
             return
 
         end = min(self._cmd_index + batch, len(self._pending_cmds))
         for i in range(self._cmd_index, end):
             name, desc, level = self._pending_cmds[i]
             if name == "__level__":
-                title = QLabel(f"权限等级 {desc}")
-                title.setStyleSheet(
-                    f"color: {theme.c('accent')}; "
-                    f"font-size: 12px; font-weight: bold; "
-                    f"padding: 8px 0 2px 0; background: transparent;")
-                self._cmd_body_layout.addWidget(title)
+                self._render_level_header(level)
             else:
-                cb = QCheckBox(f"/{name}  ·  {desc}")
-                cb.setChecked(name in self._allowed)
-                cb.setStyleSheet(
-                    f"color: {theme.c('text')}; font-size: 12px; "
-                    f"background: transparent;")
-                self._check_vars[name] = cb
-                self._cmd_body_layout.addWidget(cb)
+                self._render_command(name, desc, level)
 
         self._cmd_index = end
 
-        # 下一批延迟 15ms，让 UI 处理事件
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._render_chunk)
         self._render_timer.start(15)
 
+    def _render_level_header(self, level):
+        """渲染等级标题行 + 本等级全选/全不选按钮。"""
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 8, 0, 2)
+        row.setSpacing(6)
+
+        lbl = QLabel(f"权限等级 {level}")
+        lbl.setStyleSheet(
+            f"color: {theme.c('accent')}; "
+            f"font-size: 12px; font-weight: bold; "
+            f"background: transparent;")
+        row.addWidget(lbl)
+        row.addStretch()
+
+        btn_all = QPushButton("本等级全选")
+        btn_all.setObjectName("Ghost")
+        btn_all.setFixedHeight(26)
+        btn_all.setMinimumWidth(
+            btn_all.fontMetrics().horizontalAdvance("本等级全选") + 24)
+        btn_all.setProperty("action", "level_select")
+        btn_all.setProperty("level", str(level))
+        btn_all.clicked.connect(self._on_action_button)
+        row.addWidget(btn_all)
+
+        btn_none = QPushButton("本等级全不选")
+        btn_none.setObjectName("Ghost")
+        btn_none.setFixedHeight(26)
+        btn_none.setMinimumWidth(
+            btn_none.fontMetrics().horizontalAdvance("本等级全不选") + 24)
+        btn_none.setProperty("action", "level_unselect")
+        btn_none.setProperty("level", str(level))
+        btn_none.clicked.connect(self._on_action_button)
+        row.addWidget(btn_none)
+
+        self._cmd_body_layout.addWidget(container)
+
+    def _render_command(self, name, desc, level):
+        cb = QCheckBox(f"/{name}  ·  {desc}")
+        cb.setStyleSheet(
+            f"color: {theme.c('text')}; font-size: 12px; "
+            f"background: transparent;")
+
+        level_key = str(level)
+        cb.setProperty("cmd_name", name)
+        cb.setProperty("cmd_level", level_key)
+
+        if self._bulk_state is not None:
+            cb.setChecked(self._bulk_state)
+        elif level_key in self._level_overrides:
+            cb.setChecked(self._level_overrides[level_key])
+        else:
+            cb.setChecked(name in self._allowed)
+
+        self._check_vars[name] = cb
+        self._level_boxes.setdefault(level_key, []).append(cb)
+        self._cmd_body_layout.addWidget(cb)
+
     # ========================================================
-    #  保存
+    #  全选 / 全不选 / 按等级
     # ========================================================
-    def _save_player_commands(self):
+    def _select_all(self):
+        for cb in self._check_vars.values():
+            cb.setChecked(True)
+        if self._render_timer is not None:
+            self._bulk_state = True
+        self.state.log(
+            f"[权限] 全选（{len(self._check_vars)} 条）", "info")
+
+    def _unselect_all(self):
+        for cb in self._check_vars.values():
+            cb.setChecked(False)
+        if self._render_timer is not None:
+            self._bulk_state = False
+        self.state.log(
+            f"[权限] 全不选（{len(self._check_vars)} 条）", "info")
+
+    def _select_level(self, level, checked):
+        """切换指定等级下的所有命令。"""
+        level_key = str(level)
+
+        # 主路径：按 _level_boxes 字典匹配
+        boxes = list(self._level_boxes.get(level_key, []))
+
+        # 兜底：遍历所有 checkbox 的 cmd_level 属性
+        if not boxes:
+            for cb in self._check_vars.values():
+                if str(cb.property("cmd_level")) == level_key:
+                    boxes.append(cb)
+
+        for cb in boxes:
+            cb.setChecked(checked)
+
+        self._level_overrides[level_key] = checked
+        self.state.log(
+            f"[权限] 等级 {level_key} → "
+            f"{'全选' if checked else '全不选'}"
+            f"（{len(boxes)} 条）", "info")
+
+    # ========================================================
+    #  保存玩家授权
+    # ========================================================
+    def _save_player_commands(self, checked=False):
         if not self._selected_player:
+            QMessageBox.warning(self, "提示", "请先在左侧选择一位玩家。")
             return
-        chosen = [k for k, cb in self._check_vars.items() if cb.isChecked()]
+
+        chosen = [k for k, cb in self._check_vars.items()
+                  if cb.isChecked()]
+
+        reply = QMessageBox.question(
+            self, "保存授权确认",
+            f"即将为玩家「{self._selected_player}」保存授权：\n\n"
+            f"已勾选命令：{len(chosen)} 条\n"
+            f"总命令数：{len(self._check_vars)} 条\n\n"
+            f"是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes)
+        if reply != QMessageBox.Yes:
+            return
+
         self.state.perm_data.setdefault("players", {})[
             self._selected_player] = chosen
+
         if save_permissions(self.state.perm_data):
             self.state.perm_manager.update_data(self.state.perm_data)
             self.state.log(
                 f"已保存 {self._selected_player} 的授权（{len(chosen)} 条）",
                 "ok")
+
+            QMessageBox.information(
+                self, "保存成功",
+                f"玩家「{self._selected_player}」的授权已保存。\n\n"
+                f"共 {len(chosen)} 条命令已授权。")
+        else:
+            QMessageBox.critical(
+                self, "保存失败",
+                "无法写入权限文件，请检查数据目录的写入权限。")
 
     # ========================================================
     #  违规
@@ -398,7 +561,5 @@ class PermissionsPage(BasePage):
     #  生命周期
     # ========================================================
     def on_show(self):
-        # 策略读取很快，直接同步
         self._load_policy()
-        # 玩家列表异步加载，不阻塞 UI
         QTimer.singleShot(30, self._load_players)

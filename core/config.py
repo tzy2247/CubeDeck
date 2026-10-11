@@ -25,7 +25,7 @@ DEFAULT_CONFIG = {
     "auto_drop_clean_interval_min":  30,
 
     # ---------- 外观 ----------
-    "theme": "深蓝 (默认)",
+    "theme": "午夜黑",
     "background_image": "",
     "background_dim": 120,  # 0-255，图片叠加深色遮罩的强度
 

@@ -105,14 +105,23 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(24, 24, 24, 22)
         ll.setSpacing(2)
 
-        # ★ 不再写内联样式，用 objectName 交给 QSS 处理
+        # Logo 标题（内联样式 + 保存为实例属性，便于主题切换时刷新）
         t1 = QLabel("CubeDeck")
-        t1.setObjectName("LogoTitle")
+        t1.setStyleSheet(
+            f"color: {theme.c('text')}; "
+            f"font-size: 18px; font-weight: bold; "
+            f"letter-spacing: 0.5px; background: transparent;")
         ll.addWidget(t1)
+        self._logo_title = t1
 
+        # Logo 副标题
         t2 = QLabel("Minecraft 服务器控制台")
-        t2.setObjectName("LogoSub")
+        t2.setStyleSheet(
+            f"color: {theme.c('text_faint')}; "
+            f"font-size: 11px; letter-spacing: 0.3px; "
+            f"background: transparent;")
         ll.addWidget(t2)
+        self._logo_sub = t2
 
         sl.addWidget(logo)
 
@@ -365,16 +374,18 @@ class MainWindow(QMainWindow):
         # 2. 重建所有页面（让内联样式也应用新主题）
         self._reload_all_pages()
 
-        # 3. 更新主窗口内的内联样式控件
+        # 3. 主窗口页头标题
         self._page_title.setStyleSheet(
             f"color: {theme.c('text')}; "
             f"font-size: 22px; font-weight: bold; background: transparent;")
 
+        # 4. 状态徽章
         if self.state.is_running:
             self._refresh_status_chip("green", "运行中")
         else:
             self._refresh_status_chip("text_dim", "离线")
 
+        # 5. RCON 状态
         if self._rcon_label.text() == "RCON 已连接":
             self._rcon_dot.setStyleSheet(
                 f"color: {theme.c('green')}; font-size: 10px; "
@@ -389,6 +400,23 @@ class MainWindow(QMainWindow):
             self._rcon_label.setStyleSheet(
                 f"color: {theme.c('text_faint')}; font-size: 11px; "
                 f"background: transparent;")
+
+        # 6. ★ 刷新 Logo 内联样式
+        try:
+            self._logo_title.setStyleSheet(
+                f"color: {theme.c('text')}; "
+                f"font-size: 18px; font-weight: bold; "
+                f"letter-spacing: 0.5px; background: transparent;")
+        except Exception:
+            pass
+
+        try:
+            self._logo_sub.setStyleSheet(
+                f"color: {theme.c('text_faint')}; "
+                f"font-size: 11px; letter-spacing: 0.3px; "
+                f"background: transparent;")
+        except Exception:
+            pass
 
     def _reload_all_pages(self):
         """

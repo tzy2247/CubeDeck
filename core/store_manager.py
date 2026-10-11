@@ -31,6 +31,7 @@ class StoreManager:
             timeout=30,
             proxy=proxy,
             verify_ssl=False,
+            api_base=self.config.get("curseforge_api_base", "").strip() or None,
         )
         # 每个 provider 一套 installer（因为 store 是 provider 绑定的）
         self._installers = {

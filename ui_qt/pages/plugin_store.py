@@ -44,11 +44,19 @@ LOADERS = [
     ("Quilt", "quilt"),
 ]
 
+# 全量项目类型（Modrinth 使用）
 PROJECT_TYPES = [
     ("插件（服务端）", "plugin", "plugins"),
     ("模组", "mod", "mods"),
     ("整合包", "modpack", "__modpack__"),
     ("数据包", "datapack", "world/datapacks"),
+    ("资源包", "resourcepack", "resourcepacks"),
+]
+
+# CurseForge 只支持这三种
+CF_PROJECT_TYPES = [
+    ("模组", "mod", "mods"),
+    ("整合包", "modpack", "__modpack__"),
     ("资源包", "resourcepack", "resourcepacks"),
 ]
 
@@ -264,8 +272,8 @@ class PluginStorePage(BasePage):
         row2.setSpacing(10)
         row2.addWidget(self._make_label("类型"))
         self._type_combo = QComboBox()
-        for label, key, _ in PROJECT_TYPES:
-            self._type_combo.addItem(label, key)
+        # ★ 初始化：按当前来源重建
+        self._rebuild_type_combo(saved_source)
         self._type_combo.setFixedHeight(34)
         self._type_combo.setFixedWidth(180)
         self._type_combo.currentIndexChanged.connect(self._do_search)
@@ -413,6 +421,54 @@ class PluginStorePage(BasePage):
         return lbl
 
     # ========================================================
+    #  类型下拉框：按源动态重建
+    # ========================================================
+    def _get_project_types_for_source(self, source):
+        """根据商店源返回支持的项目类型。"""
+        if source == "curseforge":
+            return CF_PROJECT_TYPES
+        return PROJECT_TYPES
+
+    def _rebuild_type_combo(self, source):
+        """根据源重建类型下拉框，尽量保留原选择。"""
+        types = self._get_project_types_for_source(source)
+
+        # 首次构建时 _type_combo 还没数据
+        if self._type_combo.count() > 0:
+            old_data = self._type_combo.currentData()
+        else:
+            old_data = None
+
+        self._type_combo.blockSignals(True)
+        self._type_combo.clear()
+        for label, key, _ in types:
+            self._type_combo.addItem(label, key)
+
+        # 尝试恢复原选择，找不到则回到第一项
+        idx = self._type_combo.findData(old_data)
+        self._type_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._type_combo.blockSignals(False)
+
+    # ========================================================
+    #  判断 CurseForge 是否需要 API Key
+    # ========================================================
+    def _cf_needs_key(self):
+        """
+        只有使用 CurseForge 官方 API 时才强制需要 Key。
+        默认走内置 MCIM 镜像，无需 Key。
+        """
+        api_base = self.state.config_data.get(
+            "curseforge_api_base", "").strip()
+        # 未填地址 → 用内置镜像 → 不需要 Key
+        if not api_base:
+            return False
+        # 填了官方地址 → 需要 Key
+        if "api.curseforge.com" in api_base:
+            return True
+        # 自定义镜像 → 不强制要求
+        return False
+
+    # ========================================================
     #  视图切换
     # ========================================================
     def _back_to_search(self):
@@ -447,16 +503,25 @@ class PluginStorePage(BasePage):
         self.state.config_data["store_source"] = source
         self.state.save_config()
 
+        # ★ 切换源时重建类型下拉框
+        self._rebuild_type_combo(source)
+
         if source == "curseforge":
-            key = self.state.config_data.get(
-                "curseforge_api_key", "").strip()
-            if not key:
-                self._cf_status.setText("未配置 API Key")
-                self._show_placeholder(
-                    "CurseForge 需要 API Key\n\n"
-                    "请到 设置 → CurseForge 填写。")
-                return
-        self._cf_status.setText("")
+            if self._cf_needs_key():
+                key = self.state.config_data.get(
+                    "curseforge_api_key", "").strip()
+                if not key:
+                    self._cf_status.setText("使用官方 API 需配置 Key")
+                    self._show_placeholder(
+                        "当前配置为 CurseForge 官方 API\n\n"
+                        "请到 设置 → CurseForge 填写 API Key，\n"
+                        "或清空 API 地址以使用内置 MCIM 镜像。")
+                    return
+            else:
+                self._cf_status.setText("使用 MCIM 镜像")
+        else:
+            self._cf_status.setText("")
+
         self._do_search(reset=True)
 
     # ========================================================
@@ -467,10 +532,11 @@ class PluginStorePage(BasePage):
             return
 
         if self.store.get_source() == "curseforge":
-            key = self.state.config_data.get(
-                "curseforge_api_key", "").strip()
-            if not key:
-                return
+            if self._cf_needs_key():
+                key = self.state.config_data.get(
+                    "curseforge_api_key", "").strip()
+                if not key:
+                    return
 
         query = self._search_entry.text().strip()
         if reset:
@@ -480,6 +546,7 @@ class PluginStorePage(BasePage):
         loader = self._loader_combo.currentData()
         game_version = self._version_entry.text().strip() or None
 
+        # 兼容 CurseForge 的类型映射
         if self.store.get_source() == "curseforge":
             if project_type == "plugin":
                 project_type = "mod"
@@ -845,11 +912,13 @@ class PluginStorePage(BasePage):
     #  目录选择
     # ========================================================
     def _get_project_meta(self):
-        idx = self._type_combo.currentIndex()
-        if 0 <= idx < len(PROJECT_TYPES):
-            _, key, target = PROJECT_TYPES[idx]
-            return key, target
-        return "plugin", "plugins"
+        """按当前选中类型的 key 查找对应的目标子目录。"""
+        key = self._type_combo.currentData() or "mod"
+        # 优先从 PROJECT_TYPES 查找（覆盖全部类型）
+        for _label, ptype, target in PROJECT_TYPES:
+            if ptype == key:
+                return ptype, target
+        return "mod", "mods"
 
     def _default_target_dir(self, hit):
         project_type, target_subdir = self._get_project_meta()

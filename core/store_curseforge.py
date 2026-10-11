@@ -1,10 +1,10 @@
 """CurseForge 商店实现。
 
 关键差异：
-- 需要 API Key（X-Api-Key 头）
+- 官方 API 需要 API Key（X-Api-Key 头）
+- 默认走 MCIM 镜像，无需 Key；用户可自定义 API 地址
 - Minecraft 的 gameId = 432，模组 classId = 6
 - 文件下载 URL 可能为 null（作者关闭第三方分发），需要用 CDN 拼接
-- API Key 可以让用户自己填，也可以用内置的（有泄露风险）
 """
 import json
 import time
@@ -17,7 +17,15 @@ from core.store_base import BaseStoreProvider, StoreProject, StoreFile
 # ============================================================
 #  常量
 # ============================================================
-CF_API_BASE = "https://api.curseforge.com/v1"
+CF_API_BASE_OFFICIAL = "https://api.curseforge.com/v1"
+
+# 镜像站列表（按优先级）
+CF_MIRRORS = [
+    ("MCIM 镜像", "https://mod.mcimirror.top/curseforge/v1"),
+]
+
+CF_DEFAULT_API_BASE = CF_MIRRORS[0][1]
+
 CF_GAME_ID_MINECRAFT = 432
 CF_CLASS_MODS = 6
 CF_CLASS_MODPACKS = 4471
@@ -39,9 +47,16 @@ class CurseForgeProvider(BaseStoreProvider):
     display_name = "CurseForge"
 
     def __init__(self, api_key="", timeout=30, proxy=None,
-                 verify_ssl=False):
+                 verify_ssl=False, api_base=None):
         self.api_key = api_key.strip()
         self.timeout = timeout
+
+        # ★ 决定基础地址：用户自定义 > 默认镜像
+        if api_base:
+            self.api_base = api_base.rstrip("/")
+        else:
+            self.api_base = CF_DEFAULT_API_BASE
+
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": USER_AGENT,
@@ -61,14 +76,18 @@ class CurseForgeProvider(BaseStoreProvider):
     #  内部请求
     # ========================================================
     def _get(self, path, params=None):
-        if not self.api_key:
+        # ★ 官方地址必须带 Key；镜像地址允许不带
+        is_official = (self.api_base == CF_API_BASE_OFFICIAL)
+        if is_official and not self.api_key:
             raise RuntimeError(
-                "CurseForge 需要 API Key。\n"
-                "请到 设置 → 插件商店 里填写。\n"
+                "使用官方 CurseForge API 需要 API Key。\n"
+                "请到 设置 → CurseForge 里填写，或使用内置镜像。\n"
                 "申请地址：https://console.curseforge.com/#/api-keys")
 
-        url = f"{CF_API_BASE}{path}"
-        headers = {"x-api-key": self.api_key}
+        url = f"{self.api_base}{path}"
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
 
         try:
             resp = self.session.get(
@@ -82,9 +101,11 @@ class CurseForgeProvider(BaseStoreProvider):
             if code == 403:
                 raise RuntimeError(
                     "CurseForge 403 权限拒绝。\n"
-                    "可能 API Key 无效或已过期。")
+                    "可能 API Key 无效或已过期，或镜像拒绝该请求。")
             if code == 401:
-                raise RuntimeError("CurseForge API Key 无效。")
+                raise RuntimeError(
+                    "CurseForge 401 未授权。\n"
+                    "如果使用官方 API，请填写有效的 API Key。")
             if code == 429:
                 raise RuntimeError("CurseForge 请求过于频繁，请稍后重试。")
             raise RuntimeError(f"CurseForge HTTP {code}")
@@ -93,23 +114,29 @@ class CurseForgeProvider(BaseStoreProvider):
         except Exception as e:
             raise RuntimeError(f"请求 CurseForge 失败：{e}")
 
+    def _mirror_name(self):
+        """返回当前使用的镜像名称，用于状态提示。"""
+        for name, url in CF_MIRRORS:
+            if url == self.api_base:
+                return name
+        if self.api_base == CF_API_BASE_OFFICIAL:
+            return "官方"
+        return "自定义"
+
     # ========================================================
     #  搜索
     # ========================================================
     def search(self, query="", project_type="mod",
                game_version=None, loader=None,
                index="relevance", offset=0, limit=20):
-        # project_type → classId
         class_map = {
             "mod": CF_CLASS_MODS,
             "modpack": CF_CLASS_MODPACKS,
             "resourcepack": CF_CLASS_RESOURCEPACKS,
-            "plugin": CF_CLASS_MODS,   # CurseForge 没有单独的 plugin 分类
+            "plugin": CF_CLASS_MODS,
         }
         class_id = class_map.get(project_type, CF_CLASS_MODS)
 
-        # index → sortField
-        # CurseForge 的 sortField 见文档：2=Popularity, 6=TotalDownloads
         sort_map = {
             "relevance": 2,
             "downloads": 6,
@@ -139,8 +166,6 @@ class CurseForgeProvider(BaseStoreProvider):
 
         hits = []
         for m in raw or []:
-            # CurseForge 没有直接的 client_side / server_side 字段，
-            # 通过 categories 判断
             cats = [c.get("name", "").lower()
                     for c in m.get("categories", [])]
             if "client" in cats:
@@ -171,8 +196,6 @@ class CurseForgeProvider(BaseStoreProvider):
                 raw=m,
             ))
 
-        # CurseForge 的搜索不返回 total_hits，用 pagination
-        # 简单返回当前页数量，下一页按钮的判断稍后处理
         return {
             "hits": hits,
             "total_hits": offset + len(hits) + (1 if len(hits) == limit else 0),
@@ -219,7 +242,6 @@ class CurseForgeProvider(BaseStoreProvider):
                 if file_id and filename:
                     id_str = str(file_id)
                     if len(id_str) >= 4:
-                        # 拼接 CDN URL 作为主 URL
                         download_url = (
                             f"https://edge.forgecdn.net/files/"
                             f"{id_str[:4]}/{id_str[4:]}/{filename}")
@@ -228,7 +250,6 @@ class CurseForgeProvider(BaseStoreProvider):
                 else:
                     continue
 
-            # CurseForge 没有暴露依赖字段，置空
             files.append(StoreFile(
                 file_id=str(f.get("id", "")),
                 filename=f.get("fileName", ""),
@@ -240,7 +261,7 @@ class CurseForgeProvider(BaseStoreProvider):
                     1: "release", 2: "beta", 3: "alpha",
                 }.get(f.get("releaseType", 1), "release"),
                 dependencies=[],
-                fallback_urls=[download_url],  # ★
+                fallback_urls=[download_url],
             ))
         return files
 
@@ -265,11 +286,13 @@ class CurseForgeProvider(BaseStoreProvider):
     #  测试连接
     # ========================================================
     def test_connection(self):
-        if not self.api_key:
-            return False, "未配置 API Key"
+        # ★ 镜像不强制要求 Key
+        is_official = (self.api_base == CF_API_BASE_OFFICIAL)
+        if is_official and not self.api_key:
+            return False, "使用官方 API 需要配置 API Key"
+
         try:
-            # 请求一个最小的接口测试
             self._get("/games", {"pageSize": 1})
-            return True, "连接正常"
+            return True, f"连接正常（{self._mirror_name()}）"
         except Exception as e:
             return False, str(e)

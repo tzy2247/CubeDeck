@@ -219,16 +219,19 @@ class SettingsPage(BasePage):
         c7 = Card(title="CurseForge")
         b7 = c7.body()
 
+        # ★ 新增：API 地址输入框
+        self.e_cf_api_base = self._entry_row(
+            b7, "API 地址",
+            placeholder="留空使用内置 MCIM 镜像")
+
         self.e_cf_key = self._entry_row(
             b7, "API Key",
-            placeholder="从 console.curseforge.com 获取")
+            placeholder="使用镜像站时通常无需填写")
 
         cf_hint = QLabel(
-            "CurseForge 商店需要 API Key。\n"
-            "1. 访问 https://console.curseforge.com\n"
-            "2. 用 Google 账号登录\n"
-            "3. 创建组织后自动生成 API Key\n"
-            "4. 复制粘贴到上方输入框")
+            "默认走 MCIM 镜像（国内可直连），无需 API Key。\n"
+            "如需改用官方 API，请清空上方地址并在下方填入 Key。\n"
+            "官方 Key 申请：https://console.curseforge.com")
         cf_hint.setStyleSheet(
             f"color: {theme.c('text_faint')}; font-size: 11px; "
             f"background: transparent;")
@@ -377,6 +380,7 @@ class SettingsPage(BasePage):
 
         self.e_proxy.setText(cfg.get("modrinth_proxy", ""))
         self.e_modrinth_api.setText(cfg.get("modrinth_api_base", ""))
+        self.e_cf_api_base.setText(cfg.get("curseforge_api_base", ""))  # ★
         self.e_cf_key.setText(cfg.get("curseforge_api_key", ""))
 
         self._status.setText("")
@@ -410,6 +414,7 @@ class SettingsPage(BasePage):
         cfg["theme"] = self.theme_combo.currentText()
         cfg["modrinth_proxy"] = self.e_proxy.text().strip()
         cfg["modrinth_api_base"] = self.e_modrinth_api.text().strip()
+        cfg["curseforge_api_base"] = self.e_cf_api_base.text().strip()  # ★
         cfg["curseforge_api_key"] = self.e_cf_key.text().strip()
 
         if self.state.save_config():
@@ -475,10 +480,12 @@ class SettingsPage(BasePage):
 
         key = self.e_cf_key.text().strip()
         proxy = self.e_proxy.text().strip() or None
+        api_base = self.e_cf_api_base.text().strip() or None  # ★
 
         def worker():
             p = CurseForgeProvider(
-                api_key=key, timeout=15, proxy=proxy, verify_ssl=False)
+                api_key=key, timeout=15, proxy=proxy, verify_ssl=False,
+                api_base=api_base)  # ★
             ok, msg = p.test_connection()
 
             from PySide6.QtCore import QTimer

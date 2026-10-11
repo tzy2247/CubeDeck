@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "modrinth_proxy": "",
     "modrinth_api_base": "",
     "curseforge_api_key": "",
+    "curseforge_api_base": "",
     "store_source": "modrinth",  # 上次使用的源
 
     # ---------- AI 助手 ----------

@@ -10,12 +10,15 @@ import threading
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import (
+    Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve,
+)
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QScrollArea, QFrame, QMessageBox,
     QStackedWidget, QFileDialog, QProgressDialog,
+    QGraphicsOpacityEffect,
 )
 
 import requests
@@ -61,6 +64,11 @@ CF_PROJECT_TYPES = [
 DEFAULT_INDEX = "downloads"
 DEFAULT_LIMIT = 20
 ICON_SIZE = 48
+
+# ★ 动画参数
+ANIM_DURATION = 200          # 单个动画时长（ms）
+ANIM_STAGGER = 30            # 列表项错开间隔（ms）
+ANIM_MAX_STAGGER_ITEMS = 15  # 最多对前 N 项做错开动画
 
 
 # ============================================================
@@ -187,10 +195,75 @@ class PluginStorePage(BasePage):
         self.progress_step.connect(self._on_progress_step)
 
     # ========================================================
+    #  ★ 动画工具
+    # ========================================================
+    def _fade_in_widget(self, widget, duration=None):
+        """对单个 widget 做透明度淡入。"""
+        if widget is None:
+            return
+        try:
+            eff = QGraphicsOpacityEffect(widget)
+            eff.setOpacity(0.0)
+            widget.setGraphicsEffect(eff)
+
+            anim = QPropertyAnimation(eff, b"opacity", widget)
+            anim.setDuration(duration or ANIM_DURATION)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+
+            def cleanup():
+                try:
+                    widget.setGraphicsEffect(None)
+                except Exception:
+                    pass
+
+            anim.finished.connect(cleanup)
+            # 持有引用防止被 GC
+            widget._fade_anim = anim
+            anim.start()
+        except Exception:
+            # 动画失败不影响功能
+            try:
+                widget.setGraphicsEffect(None)
+            except Exception:
+                pass
+
+    def _fade_in_items(self, items):
+        """列表项错开淡入。只对前 N 项做动画，其余立即显示。"""
+        if not items:
+            return
+
+        visible = items[:ANIM_MAX_STAGGER_ITEMS]
+        rest = items[ANIM_MAX_STAGGER_ITEMS:]
+
+        # 剩余项立即显示（清除可能存在的 effect）
+        for w in rest:
+            try:
+                w.setGraphicsEffect(None)
+            except Exception:
+                pass
+
+        # 前 N 项错开淡入
+        for i, w in enumerate(visible):
+            QTimer.singleShot(
+                i * ANIM_STAGGER + 20,
+                lambda w=w: self._fade_in_widget(w)
+            )
+
+    def _switch_view(self, index, fade=True):
+        """切换视图，带淡入过渡。"""
+        if self._stack.currentIndex() == index:
+            return
+        target = self._stack.widget(index)
+        self._stack.setCurrentIndex(index)
+        if fade and target is not None:
+            self._fade_in_widget(target, duration=180)
+
+    # ========================================================
     #  ★ 安全 emit 辅助
     # ========================================================
     def _safe_emit(self, signal, *args):
-        """在 worker 线程里安全 emit，页面已销毁或已取消时静默返回。"""
         if self._cancelled:
             return
         try:
@@ -467,7 +540,7 @@ class PluginStorePage(BasePage):
     #  视图切换
     # ========================================================
     def _back_to_search(self):
-        self._stack.setCurrentIndex(0)
+        self._switch_view(0)
 
     def _show_versions_view(self, hit):
         self._current_hit = hit
@@ -485,7 +558,9 @@ class PluginStorePage(BasePage):
 
         self._versions_status.setText("加载中…")
         self._auto_install_btn.setEnabled(False)
-        self._stack.setCurrentIndex(1)
+
+        # ★ 带淡入切换到版本视图
+        self._switch_view(1)
 
     # ========================================================
     #  源切换
@@ -532,7 +607,6 @@ class PluginStorePage(BasePage):
                 if not key:
                     return
 
-        # ★ 每次发起新搜索，重置取消标志
         self._cancelled = False
 
         query = self._search_entry.text().strip()
@@ -550,7 +624,7 @@ class PluginStorePage(BasePage):
                 project_type = "mod"
 
         index = DEFAULT_INDEX if not query else "relevance"
-        self._status_label.setText("搜索中…")
+        self._set_status("搜索中…")
 
         offset = self._current_offset
         page_size = self._page_size
@@ -569,7 +643,6 @@ class PluginStorePage(BasePage):
             except Exception as e:
                 result = {"error": str(e)}
 
-            # ★ 页面已销毁/已取消 → 不 emit
             if self._cancelled:
                 return
             try:
@@ -579,13 +652,20 @@ class PluginStorePage(BasePage):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _set_status(self, text):
+        """更新状态标签，变化时带淡入。"""
+        if self._status_label.text() == text:
+            return
+        self._status_label.setText(text)
+        self._fade_in_widget(self._status_label, duration=150)
+
     @Slot(dict)
     def _on_search_result(self, result):
         if self._cancelled:
             return
 
         if "error" in result:
-            self._status_label.setText("搜索失败")
+            self._set_status("搜索失败")
             self._show_placeholder(
                 f"搜索失败：{result['error']}\n\n"
                 f"可尝试切换来源、配置代理或稍后重试。")
@@ -599,10 +679,9 @@ class PluginStorePage(BasePage):
 
         page = self._current_offset // self._page_size + 1
         if self._search_entry.text().strip():
-            self._status_label.setText(
-                f"找到 {total} 个结果 · 第 {page} 页")
+            self._set_status(f"找到 {total} 个结果 · 第 {page} 页")
         else:
-            self._status_label.setText(f"热门内容 · 第 {page} 页")
+            self._set_status(f"热门内容 · 第 {page} 页")
 
         self._clear_list()
         if not hits:
@@ -612,10 +691,15 @@ class PluginStorePage(BasePage):
             self._update_pagination()
             return
 
+        # ★ 收集 items 后统一错开淡入
+        items = []
         for hit in hits:
-            self._list_layout.addWidget(self._make_result_item(hit))
-
+            item = self._make_result_item(hit)
+            self._list_layout.addWidget(item)
+            items.append(item)
         self._list_layout.addStretch()
+
+        self._fade_in_items(items)
         self._update_pagination()
 
     def _update_pagination(self):
@@ -755,6 +839,8 @@ class PluginStorePage(BasePage):
         try:
             label.setText("")
             label.setPixmap(pixmap)
+            # ★ 图标淡入
+            self._fade_in_widget(label, duration=180)
         except Exception:
             pass
 
@@ -768,6 +854,8 @@ class PluginStorePage(BasePage):
             f"padding: 60px; background: transparent;")
         self._list_layout.addWidget(lbl)
         self._list_layout.addStretch()
+        # ★ 占位符淡入
+        self._fade_in_widget(lbl, duration=200)
 
     def _clear_list(self):
         while self._list_layout.count():
@@ -785,8 +873,7 @@ class PluginStorePage(BasePage):
             QMessageBox.information(self, "提示", "已有安装任务进行中")
             return
 
-        self._cancelled = False  # ★ 新操作，重置取消标志
-
+        self._cancelled = False
         self._show_versions_view(hit)
 
         loader = self._loader_combo.currentData()
@@ -846,6 +933,7 @@ class PluginStorePage(BasePage):
             self._versions_layout.addStretch()
             self._versions_status.setText("失败")
             self._auto_install_btn.setEnabled(False)
+            self._fade_in_widget(lbl, duration=200)
             return
 
         if not files:
@@ -867,12 +955,31 @@ class PluginStorePage(BasePage):
             self._versions_layout.addStretch()
             self._versions_status.setText("0 个版本")
             self._auto_install_btn.setEnabled(False)
+            self._fade_in_widget(lbl, duration=200)
             return
 
         self._clear_versions_layout()
+
+        # ★ 收集 items 后统一错开淡入
+        items = []
         for f in files[:300]:
-            self._versions_layout.addWidget(self._make_version_row(f))
+            row = self._make_version_row(f)
+            self._versions_layout.addWidget(row)
+            items.append(row)
         self._versions_layout.addStretch()
+
+        # 版本列表每项动画更短一些，因为列表可能很长
+        visible = items[:ANIM_MAX_STAGGER_ITEMS]
+        for w in items[ANIM_MAX_STAGGER_ITEMS:]:
+            try:
+                w.setGraphicsEffect(None)
+            except Exception:
+                pass
+        for i, w in enumerate(visible):
+            QTimer.singleShot(
+                i * 20 + 20,
+                lambda w=w: self._fade_in_widget(w, duration=160)
+            )
 
         self._versions_status.setText(f"共 {len(files)} 个版本")
         self._auto_install_btn.setEnabled(True)
@@ -999,7 +1106,7 @@ class PluginStorePage(BasePage):
 
     def _do_install(self, hit, file, target_dir, with_deps=False):
         self._installing = True
-        self._cancelled = False  # ★ 新任务，重置
+        self._cancelled = False
         target_dir = Path(target_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1013,7 +1120,6 @@ class PluginStorePage(BasePage):
         self._progress_dlg.setLabelText("准备中…")
         self._progress_dlg.show()
 
-        # 预先取参数（避免 worker 里访问 GUI）
         loader = self._loader_combo.currentData()
         game_version = self._version_entry.text().strip() or None
 
@@ -1230,7 +1336,7 @@ class PluginStorePage(BasePage):
     def _do_import_mrpack(self, mrpack_path, target_dir,
                           include_optional=False):
         self._installing = True
-        self._cancelled = False  # ★ 新任务，重置
+        self._cancelled = False
 
         self.state.log(
             f"开始导入整合包：{mrpack_path.name} → {target_dir}", "info")
@@ -1294,7 +1400,6 @@ class PluginStorePage(BasePage):
     #  生命周期
     # ========================================================
     def on_show(self):
-        # ★ 进入页面时清除取消标志
         self._cancelled = False
         self.store.reload()
         if self._loaded_once:

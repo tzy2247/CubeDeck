@@ -30,21 +30,6 @@ THEMES = {
         "is_light": False,
     },
 
-    # ★ 浅绿
-    "淡绿": {
-        "bg": "#f0faf5", "sidebar": "#e5f5ec", "card": "#ffffff",
-        "card_hover": "#f7fdfa", "console_bg": "#0d1a14",
-        "border": "#c8e6d4",
-        "accent": "#10b981", "accent_hover": "#059669",
-        "green": "#16a34a", "green_hover": "#15803d",
-        "red": "#dc2626", "red_hover": "#b91c1c",
-        "orange": "#ea580c", "orange_hover": "#c2410c",
-        "purple": "#8b5cf6", "purple_hover": "#7c3aed",
-        "text": "#1a3a2c", "text_dim": "#5a7a6a", "text_faint": "#93b0a2",
-        "input_bg": "#ffffff", "input_text": "#1a3a2c",
-        "is_light": True,
-    },
-
     "午夜黑": {
         "bg": "#000000", "sidebar": "#0a0a0a", "card": "#131313",
         "card_hover": "#1c1c1c", "console_bg": "#050505",
@@ -59,11 +44,10 @@ THEMES = {
         "is_light": False,
     },
 
-    # ★ 晨白（与午夜黑对应）
     "晨白": {
-        "bg": "#ffffff", "sidebar": "#f5f5f7", "card": "#fafafa",
-        "card_hover": "#f0f0f0", "console_bg": "#1a1a1a",
-        "border": "#e4e4e7",
+        "bg": "#f0f0f3", "sidebar": "#e6e6ea", "card": "#f7f7f9",
+        "card_hover": "#e4e4e8", "console_bg": "#1a1a1a",
+        "border": "#d8d8dd",
         "accent": "#4f7cf5", "accent_hover": "#3b66d8",
         "green": "#16a34a", "green_hover": "#15803d",
         "red": "#dc2626", "red_hover": "#b91c1c",
@@ -74,11 +58,24 @@ THEMES = {
         "is_light": True,
     },
 
-    # ★ 浅橙
+    "淡绿": {
+        "bg": "#e3efe8", "sidebar": "#d6e7de", "card": "#f2f9f5",
+        "card_hover": "#e7f1eb", "console_bg": "#0d1a14",
+        "border": "#bdd9c9",
+        "accent": "#10b981", "accent_hover": "#059669",
+        "green": "#16a34a", "green_hover": "#15803d",
+        "red": "#dc2626", "red_hover": "#b91c1c",
+        "orange": "#ea580c", "orange_hover": "#c2410c",
+        "purple": "#8b5cf6", "purple_hover": "#7c3aed",
+        "text": "#1a3a2c", "text_dim": "#5a7a6a", "text_faint": "#93b0a2",
+        "input_bg": "#ffffff", "input_text": "#1a3a2c",
+        "is_light": True,
+    },
+
     "浅橙": {
-        "bg": "#fff7f0", "sidebar": "#fdefe4", "card": "#ffffff",
-        "card_hover": "#fffaf5", "console_bg": "#1a1410",
-        "border": "#f5d5b8",
+        "bg": "#f4eae0", "sidebar": "#f0dfcc", "card": "#faf4ea",
+        "card_hover": "#efe5d6", "console_bg": "#1a1410",
+        "border": "#e5c9aa",
         "accent": "#f97316", "accent_hover": "#ea580c",
         "green": "#16a34a", "green_hover": "#15803d",
         "red": "#dc2626", "red_hover": "#b91c1c",
@@ -89,11 +86,10 @@ THEMES = {
         "is_light": True,
     },
 
-    # ★ 浅粉
     "浅粉": {
-        "bg": "#fdf0f4", "sidebar": "#f9e4eb", "card": "#ffffff",
-        "card_hover": "#fef5f8", "console_bg": "#1a1116",
-        "border": "#f0d0dc",
+        "bg": "#f5e5eb", "sidebar": "#f0d8e0", "card": "#faf1f5",
+        "card_hover": "#f0e0e8", "console_bg": "#1a1116",
+        "border": "#e0c0cc",
         "accent": "#e91e63", "accent_hover": "#d4145a",
         "green": "#16a34a", "green_hover": "#15803d",
         "red": "#dc2626", "red_hover": "#b91c1c",

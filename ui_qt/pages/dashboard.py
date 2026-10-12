@@ -31,6 +31,36 @@ class DashboardPage(BasePage):
         state.server_stopping.connect(self._on_stopping)
         state.server_stopped.connect(self._on_stopped)
         state.stats_updated.connect(self._on_stats)
+        self._sync_initial_state()
+
+    def _sync_initial_state(self):
+        """
+        根据 state 当前实际状态同步 UI。
+        用于：
+        - 主题切换后重建页面
+        - 任何需要重新同步的场景
+        """
+        try:
+            if self.state.is_running:
+                # 服务器在运行：按钮显示"停止服务器"，状态显示"运行中"
+                self._toggle_btn.setEnabled(True)
+                self._apply_toggle_style("red", "停止服务器")
+                self._dot.setStyleSheet(
+                    f"color: {theme.c('green')}; font-size: 22px; "
+                    f"background: transparent;")
+                self._status_title.setText("服务器运行中")
+                self._status_sub.setText("进程已启动，正在监听日志…")
+            else:
+                # 服务器未运行
+                self._toggle_btn.setEnabled(True)
+                self._apply_toggle_style("green", "启动服务器")
+                self._dot.setStyleSheet(
+                    f"color: {theme.c('text_faint')}; font-size: 22px; "
+                    f"background: transparent;")
+                self._status_title.setText("服务器未运行")
+                self._status_sub.setText("点击右侧按钮启动服务器")
+        except Exception:
+            pass
 
     # ========================================================
     #  构建

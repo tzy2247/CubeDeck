@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
-USER_AGENT = "CubeDeck/0.1.0"
+USER_AGENT = "CubeDeck/0.1.1"
 DEFAULT_TIMEOUT = 45
 MIN_DOWNLOAD_SIZE = 100 * 1024
 

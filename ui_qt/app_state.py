@@ -1317,6 +1317,7 @@ class AppState(QObject):
     def _refresh_stats(self):
         stats = {}
 
+        # ---- 内存 ----
         if self._server_pid:
             try:
                 import psutil
@@ -1326,49 +1327,89 @@ class AppState(QObject):
             except Exception:
                 pass
 
+        # ---- 运行时长 ----
         if self.start_time:
             stats["uptime"] = int(time.time() - self.start_time)
 
         client = self.rcon_client
-        if client and client.connected:
-            try:
-                cmd = self.server_info.cmd_tps()
-                if cmd:
-                    resp = client.command(cmd) or ""
+        if not (client and client.connected):
+            self.stats_updated.emit(stats)
+            return
 
-                    # ★ 优先：找冒号后面的第一个浮点数（标准 TPS 响应格式）
-                    m = re.search(
-                        r":\s*[^\d]*(\d+(?:\.\d+)?)",
-                        resp)
-                    if not m:
-                        # 兜底1：找所有浮点数里的最大值（过滤版本号等）
-                        candidates = re.findall(
-                            r"(\d+\.\d+)", resp)
-                        floats = []
-                        for c in candidates:
-                            try:
-                                v = float(c)
-                                if 0.0 <= v <= 100.0:
-                                    floats.append(v)
-                            except ValueError:
-                                pass
-                        if floats:
-                            stats["tps"] = max(floats)
-                            if "tps" not in stats:
-                                pass
-                        else:
+        # ---- TPS ----
+        try:
+            cmd = self.server_info.cmd_tps()
+            if cmd:
+                resp = client.command(cmd) or ""
+
+                # 去颜色代码（Paper 26.x 会带 §x）
+                clean = re.sub(r"§.", "", resp)
+
+                # 优先：冒号后面的第一个浮点数
+                m = re.search(r":\s*[^\d]*(\d+(?:\.\d+)?)", clean)
+                if not m:
+                    # 兜底：所有浮点数里最大值（过滤版本号）
+                    candidates = re.findall(r"(\d+\.\d+)", clean)
+                    floats = []
+                    for c in candidates:
+                        try:
+                            v = float(c)
+                            if 0.0 <= v <= 100.0:
+                                floats.append(v)
+                        except ValueError:
+                            pass
+                    if floats:
+                        stats["tps"] = max(floats)
+                    else:
+                        # 只警告一次，避免刷屏
+                        if not getattr(self, "_tps_warned", False):
+                            self._tps_warned = True
                             self.log(
                                 f"[调试] TPS 解析失败，原始响应："
                                 f"{resp[:200]!r}", "warn")
-                    else:
-                        try:
-                            tps_val = float(m.group(1))
-                            if 0.0 <= tps_val <= 100.0:
-                                stats["tps"] = tps_val
-                        except ValueError:
-                            pass
-            except Exception:
-                pass
+                else:
+                    try:
+                        tps_val = float(m.group(1))
+                        if 0.0 <= tps_val <= 100.0:
+                            stats["tps"] = tps_val
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+
+        # ---- 在线玩家数 ----
+        try:
+            resp = client.command("list") or ""
+
+            # ★ 去颜色代码
+            clean = re.sub(r"§.", "", resp)
+
+            # 匹配 "There are N of a max of M"
+            m = re.search(
+                r"There are (\d+) of a max of (\d+)",
+                clean, re.IGNORECASE)
+            if not m:
+                # 宽松兜底："N ... M players" 或 "N of a max of M"
+                m = re.search(
+                    r"(\d+)\s+of\s+a\s+max\s+of\s+(\d+)",
+                    clean, re.IGNORECASE)
+            if not m:
+                # 极端兜底：N / M
+                m = re.search(r"(\d+)\s*/\s*(\d+)", clean)
+
+            if m:
+                stats["players"] = f"{m.group(1)} / {m.group(2)}"
+            else:
+                # 只警告一次
+                if not getattr(self, "_list_warned", False):
+                    self._list_warned = True
+                    self.log(
+                        f"[调试] 在线玩家解析失败，原始响应："
+                        f"{resp[:200]!r}", "warn")
+        except Exception as e:
+            if not getattr(self, "_list_warned", False):
+                self._list_warned = True
+                self.log(f"[调试] list 命令失败：{e}", "warn")
 
         self.stats_updated.emit(stats)
 

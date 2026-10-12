@@ -19,7 +19,6 @@ from core.store_base import BaseStoreProvider, StoreProject, StoreFile
 # ============================================================
 CF_API_BASE_OFFICIAL = "https://api.curseforge.com/v1"
 
-# 镜像站列表（按优先级）
 CF_MIRRORS = [
     ("MCIM 镜像", "https://mod.mcimirror.top/curseforge/v1"),
 ]
@@ -50,7 +49,6 @@ class CurseForgeProvider(BaseStoreProvider):
                  verify_ssl=False, api_base=None):
         self.api_key = api_key.strip()
         self.timeout = timeout
-
         # ★ 决定基础地址：用户自定义 > 默认镜像
         if api_base:
             self.api_base = api_base.rstrip("/")

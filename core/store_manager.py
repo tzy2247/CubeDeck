@@ -15,6 +15,8 @@ class StoreManager:
 
     def _rebuild(self):
         proxy = self.config.get("modrinth_proxy", "").strip() or None
+        # ★ 读取下载源优先级
+        prefer = self.config.get("download_prefer", "official")
 
         # 共享一个 Downloader（连接池复用）
         self._downloader = Downloader(
@@ -25,6 +27,7 @@ class StoreManager:
             api_base=self.config.get("modrinth_api_base", "").strip() or None,
             verify_ssl=False,
             downloader=self._downloader,
+            prefer=prefer,   # ★
         )
         self._providers["curseforge"] = CurseForgeProvider(
             api_key=self.config.get("curseforge_api_key", "").strip(),
@@ -33,7 +36,6 @@ class StoreManager:
             verify_ssl=False,
             api_base=self.config.get("curseforge_api_base", "").strip() or None,
         )
-        # 每个 provider 一套 installer（因为 store 是 provider 绑定的）
         self._installers = {
             k: ModInstaller(p, self.log)
             for k, p in self._providers.items()

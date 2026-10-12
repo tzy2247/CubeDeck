@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QMessageBox,
     QDialog,
 )
-
+import ctypes
+from ctypes import wintypes
 from ui_qt.theme import theme
 from ui_qt.app_state import AppState
 
@@ -39,6 +40,30 @@ NAV_ITEMS = [
     "设置",
 ]
 
+def _set_titlebar_dark(hwnd: int, dark: bool) -> bool:
+    """
+    设置 Windows 10/11 窗口标题栏的深色模式。
+    使用 DwmSetWindowAttribute，属性 ID 在不同 Windows 版本有差异，
+    所以依次尝试 20（Win10 20H1+）和 19（Win10 1809~1909）。
+    """
+    try:
+        value = ctypes.c_int(1 if dark else 0)
+        for attr in (20, 19):
+            try:
+                res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd),
+                    ctypes.c_uint(attr),
+                    ctypes.byref(value),
+                    ctypes.sizeof(value),
+                )
+                if res == 0:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -63,6 +88,20 @@ class MainWindow(QMainWindow):
         # 无服务器时弹出引导
         if not self.state.has_server():
             QTimer.singleShot(300, self._show_onboarding)
+        # ★ 应用标题栏主题（要等窗口显示后再设才生效）
+        QTimer.singleShot(50, self._apply_titlebar_theme)
+
+    def _apply_titlebar_theme(self):
+        """应用标题栏深色/浅色（仅 Windows）"""
+        import sys
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            return
+        # 浅色主题 → 标题栏浅色（dark=False）；深色主题 → dark=True
+        _set_titlebar_dark(hwnd, not theme.is_light())
 
     # ========================================================
     def _connect_signals(self):
@@ -418,15 +457,25 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # ★ 刷新标题栏
+        try:
+            self._apply_titlebar_theme()
+        except Exception:
+            pass
+
     def _reload_all_pages(self):
-        """
-        销毁并重建所有页面。
-        主题切换时调用，让所有内联样式用新主题重新生成。
-        """
-        # 记住当前页
+        """销毁并重建所有页面。"""
         current_idx = self._stack.currentIndex()
 
-        # 从栈里移除旧页面 + 标记删除
+        # ★ 关键：先标记所有页面为"已取消"
+        for p in self._pages:
+            try:
+                if hasattr(p, "cancel"):
+                    p.cancel()
+            except Exception:
+                pass
+
+        # 再销毁
         for p in self._pages:
             try:
                 self._stack.removeWidget(p)
@@ -440,7 +489,7 @@ class MainWindow(QMainWindow):
 
         self._pages = []
 
-        # 重新创建
+        # 重建
         try:
             self._pages = [
                 DashboardPage(self.state),
@@ -462,7 +511,6 @@ class MainWindow(QMainWindow):
         for p in self._pages:
             self._stack.addWidget(p)
 
-        # 恢复当前页
         if 0 <= current_idx < len(self._pages):
             self._stack.setCurrentIndex(current_idx)
             page = self._pages[current_idx]

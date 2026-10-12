@@ -11,9 +11,10 @@ class ModrinthProvider(BaseStoreProvider):
     display_name = "Modrinth"
 
     def __init__(self, proxy=None, api_base=None, verify_ssl=False,
-                 downloader=None):
+                 downloader=None, prefer="official"):
         self.client = ModrinthClient(
-            proxy=proxy, api_base=api_base, verify_ssl=verify_ssl)
+            proxy=proxy, api_base=api_base, verify_ssl=verify_ssl,
+            prefer=prefer)
         self.downloader = downloader or Downloader(
             proxy=proxy, verify_ssl=verify_ssl)
 
@@ -69,7 +70,6 @@ class ModrinthProvider(BaseStoreProvider):
 
         files = []
         for v in raw_versions:
-            # 解析依赖
             deps = []
             for d in v.get("dependencies", []):
                 deps.append(StoreDependency(
@@ -79,7 +79,6 @@ class ModrinthProvider(BaseStoreProvider):
                 ))
 
             for f in v.get("files", []):
-                # 收集所有下载 URL（主 URL + 备用）
                 fallback_urls = []
                 if f.get("url"):
                     fallback_urls.append(f["url"])

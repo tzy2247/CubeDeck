@@ -15,13 +15,15 @@ except ImportError:
 
 
 # ============================================================
-#  镜像站列表（按优先级）
+#  官方 + 镜像
 # ============================================================
+OFFICIAL_API_BASE = "https://api.modrinth.com/v2"
+
 MIRRORS = [
     ("镜像A",  "https://mod.mcimirror.top/modrinth/v2"),
 ]
 
-DEFAULT_API_BASE = MIRRORS[0][1]
+DEFAULT_API_BASE = OFFICIAL_API_BASE
 
 USER_AGENT = "CubeDeck/0.1.0"
 
@@ -32,18 +34,34 @@ MAX_DEBUG_LEN = 500
 class ModrinthClient:
     def __init__(self, timeout=DEFAULT_TIMEOUT, proxy=None,
                  api_base=None, user_agent=None, verify_ssl=False,
-                 max_retries=2, auto_fallback=True):
+                 max_retries=2, auto_fallback=True,
+                 prefer="official"):
         self.timeout = timeout
         self.proxy = proxy
         self.user_agent = user_agent or USER_AGENT
         self.verify_ssl = verify_ssl
         self.max_retries = max_retries
         self.auto_fallback = auto_fallback
+        self.prefer = prefer
 
+        # ★ 三组源：
+        #   official  - Mojang 官方
+        #   mirror    - 内置镜像站
+        #   custom    - 用户在设置页填写的自定义 API（可选）
+        #
+        # 自定义源不再是独占，而是和镜像/官方一起参与排序。
+        official = [("官方", OFFICIAL_API_BASE)]
+        mirror = list(MIRRORS)
+        custom = []
         if api_base:
-            self.mirrors = [("自定义", api_base.rstrip("/"))]
+            custom = [("自定义", api_base.rstrip("/"))]
+
+        if prefer == "mirror":
+            # 镜像优先：镜像 → 自定义 → 官方
+            self.mirrors = mirror + custom + official
         else:
-            self.mirrors = list(MIRRORS)
+            # 官方优先：官方 → 自定义 → 镜像
+            self.mirrors = official + custom + mirror
 
         self.api_base = self.mirrors[0][1]
 
@@ -90,15 +108,12 @@ class ModrinthClient:
         resp = self.session.get(
             url, params=params, timeout=self.timeout)
 
-        # 先看 HTTP 状态
         if resp.status_code >= 400:
-            # 拿一段响应体帮助诊断
             body = self._extract_body(resp)
             raise requests.exceptions.HTTPError(
                 f"HTTP {resp.status_code}: {body}",
                 response=resp)
 
-        # ★ 关键：检测非 JSON 响应
         text = resp.text
         if not text or not text.strip():
             raise RuntimeError(
@@ -112,7 +127,6 @@ class ModrinthClient:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # 不是 JSON，把原文带出来
             preview = text[:MAX_DEBUG_LEN].replace("\n", " ")
             raise RuntimeError(
                 f"响应不是合法 JSON\n"
@@ -122,7 +136,6 @@ class ModrinthClient:
 
     @staticmethod
     def _extract_body(resp, limit=MAX_DEBUG_LEN):
-        """从响应里提取一段可读文本用于诊断。"""
         try:
             text = resp.text or ""
         except Exception:
@@ -132,6 +145,7 @@ class ModrinthClient:
 
     def _request(self, path, params=None):
         last_error = None
+        all_errors = []   # 记录所有源的失败原因
 
         for idx, (name, base_url) in enumerate(self.mirrors):
             for attempt in range(self.max_retries + 1):
@@ -144,6 +158,7 @@ class ModrinthClient:
                     code = e.response.status_code if e.response is not None else 0
                     body = self._extract_body(e.response) if e.response else ""
                     last_error = self._format_http_error(code, name, body)
+                    all_errors.append(last_error)
                     # 4xx 不重试，直接换镜像
                     if 400 <= code < 500:
                         break
@@ -154,15 +169,18 @@ class ModrinthClient:
 
                 except requests.exceptions.SSLError as e:
                     last_error = f"[{name}] SSL 错误：{e}"
+                    all_errors.append(last_error)
                     break
 
                 except requests.exceptions.ProxyError as e:
                     last_error = (f"[{name}] 代理错误：{e}\n"
                                   f"  请检查代理地址和端口。")
+                    all_errors.append(last_error)
                     break
 
                 except requests.exceptions.ConnectionError as e:
                     last_error = self._format_connection_error(e, name)
+                    all_errors.append(last_error)
                     if attempt < self.max_retries:
                         time.sleep(1.5 * (attempt + 1))
                         continue
@@ -170,19 +188,20 @@ class ModrinthClient:
 
                 except requests.exceptions.Timeout:
                     last_error = f"[{name}] 请求超时（{self.timeout}s）"
+                    all_errors.append(last_error)
                     if attempt < self.max_retries:
                         time.sleep(1.0 * (attempt + 1))
                         continue
                     break
 
                 except RuntimeError as e:
-                    # 来自 _request_once 的 JSON 解析 / 空响应错误
                     last_error = f"[{name}] {e}"
-                    # 不重试，直接下一个镜像
+                    all_errors.append(last_error)
                     break
 
                 except Exception as e:
                     last_error = f"[{name}] 请求失败：{e}"
+                    all_errors.append(last_error)
                     if attempt < self.max_retries:
                         time.sleep(1.0 * (attempt + 1))
                         continue
@@ -191,6 +210,12 @@ class ModrinthClient:
             # 尝试下一个镜像
             if not self.auto_fallback:
                 break
+
+        # ★ 把所有失败原因汇总返回，方便诊断
+        if all_errors:
+            detail = "\n".join(f"  · {e}" for e in all_errors)
+            raise RuntimeError(
+                f"所有源均不可用（共 {len(self.mirrors)} 个）：\n{detail}")
 
         raise RuntimeError(last_error or "所有镜像均不可用")
 

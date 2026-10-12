@@ -178,6 +178,27 @@ class SettingsPage(BasePage):
         c6 = Card(title="网络 / 代理")
         b6 = c6.body()
 
+        pref_row = QHBoxLayout()
+        pref_row.setSpacing(10)
+        pref_row.addWidget(self._make_label("下载源优先级()"))
+
+        self.pref_combo = QComboBox()
+        self.pref_combo.addItem("官方源优先", "official")
+        self.pref_combo.addItem("镜像源优先", "mirror")
+        self.pref_combo.setFixedHeight(34)
+        self.pref_combo.setFixedWidth(220)
+        pref_row.addWidget(self.pref_combo)
+        pref_row.addStretch()
+        b6.addLayout(pref_row)
+
+        pref_hint = QLabel(
+            "官方源通常更新更快；镜像源在部分网络下更稳定。")
+        pref_hint.setStyleSheet(
+            f"color: {theme.c('text_faint')}; font-size: 11px; "
+            f"background: transparent;")
+        pref_hint.setWordWrap(True)
+        b6.addWidget(pref_hint)
+
         self.e_proxy = self._entry_row(
             b6, "HTTP 代理",
             placeholder="如 http://127.0.0.1:7890")
@@ -440,6 +461,11 @@ class SettingsPage(BasePage):
         self.cb_auto_restart.setChecked(bool(cfg.get("auto_restart")))
         self.cb_global_clean.setChecked(
             bool(cfg.get("global_clean_enabled")))
+        # ★ 下载源优先级
+        cur_pref = cfg.get("download_prefer", "official")
+        idx = self.pref_combo.findData(cur_pref)
+        if idx >= 0:
+            self.pref_combo.setCurrentIndex(idx)
 
         cur_theme = cfg.get("theme", "深蓝")
         idx = self.theme_combo.findText(cur_theme)
@@ -494,6 +520,7 @@ class SettingsPage(BasePage):
         cfg["modrinth_proxy"] = self.e_proxy.text().strip()
         cfg["modrinth_api_base"] = self.e_modrinth_api.text().strip()
         cfg["curseforge_api_key"] = self.e_cf_key.text().strip()
+        cfg["download_prefer"] = self.pref_combo.currentData() or "official"
 
         if not self.state.save_config():
             QMessageBox.critical(self, "保存失败", "无法写入配置文件")
@@ -519,6 +546,13 @@ class SettingsPage(BasePage):
             from PySide6.QtWidgets import QApplication
             QApplication.instance().setStyleSheet(_t.qss())
             self.state.theme_changed.emit(cfg["theme"])
+        # ★ 通知商店重建（以应用新的下载源优先级）
+        try:
+            main = self.window()
+            if hasattr(main, "reload_store_manager"):
+                main.reload_store_manager()
+        except Exception:
+            pass
 
     def on_show(self):
         self._reload()

@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "curseforge_api_key": "",
     "curseforge_api_base": "",
     "store_source": "modrinth",  # 上次使用的源
+    "download_prefer": "official",
 
     # ---------- AI 助手 ----------
     "ai_enabled": False,

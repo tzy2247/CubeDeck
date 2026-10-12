@@ -44,7 +44,6 @@ LOADERS = [
     ("Quilt", "quilt"),
 ]
 
-# 全量项目类型（Modrinth 使用）
 PROJECT_TYPES = [
     ("插件（服务端）", "plugin", "plugins"),
     ("模组", "mod", "mods"),
@@ -53,7 +52,6 @@ PROJECT_TYPES = [
     ("资源包", "resourcepack", "resourcepacks"),
 ]
 
-# CurseForge 只支持这三种
 CF_PROJECT_TYPES = [
     ("模组", "mod", "mods"),
     ("整合包", "modpack", "__modpack__"),
@@ -189,6 +187,18 @@ class PluginStorePage(BasePage):
         self.progress_step.connect(self._on_progress_step)
 
     # ========================================================
+    #  ★ 安全 emit 辅助
+    # ========================================================
+    def _safe_emit(self, signal, *args):
+        """在 worker 线程里安全 emit，页面已销毁或已取消时静默返回。"""
+        if self._cancelled:
+            return
+        try:
+            signal.emit(*args)
+        except (RuntimeError, AttributeError):
+            pass
+
+    # ========================================================
     #  构建
     # ========================================================
     def _build(self):
@@ -272,7 +282,6 @@ class PluginStorePage(BasePage):
         row2.setSpacing(10)
         row2.addWidget(self._make_label("类型"))
         self._type_combo = QComboBox()
-        # ★ 初始化：按当前来源重建
         self._rebuild_type_combo(saved_source)
         self._type_combo.setFixedHeight(34)
         self._type_combo.setFixedWidth(180)
@@ -421,19 +430,16 @@ class PluginStorePage(BasePage):
         return lbl
 
     # ========================================================
-    #  类型下拉框：按源动态重建
+    #  类型下拉框
     # ========================================================
     def _get_project_types_for_source(self, source):
-        """根据商店源返回支持的项目类型。"""
         if source == "curseforge":
             return CF_PROJECT_TYPES
         return PROJECT_TYPES
 
     def _rebuild_type_combo(self, source):
-        """根据源重建类型下拉框，尽量保留原选择。"""
         types = self._get_project_types_for_source(source)
 
-        # 首次构建时 _type_combo 还没数据
         if self._type_combo.count() > 0:
             old_data = self._type_combo.currentData()
         else:
@@ -444,28 +450,17 @@ class PluginStorePage(BasePage):
         for label, key, _ in types:
             self._type_combo.addItem(label, key)
 
-        # 尝试恢复原选择，找不到则回到第一项
         idx = self._type_combo.findData(old_data)
         self._type_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._type_combo.blockSignals(False)
 
-    # ========================================================
-    #  判断 CurseForge 是否需要 API Key
-    # ========================================================
     def _cf_needs_key(self):
-        """
-        只有使用 CurseForge 官方 API 时才强制需要 Key。
-        默认走内置 MCIM 镜像，无需 Key。
-        """
         api_base = self.state.config_data.get(
             "curseforge_api_base", "").strip()
-        # 未填地址 → 用内置镜像 → 不需要 Key
         if not api_base:
             return False
-        # 填了官方地址 → 需要 Key
         if "api.curseforge.com" in api_base:
             return True
-        # 自定义镜像 → 不强制要求
         return False
 
     # ========================================================
@@ -503,7 +498,6 @@ class PluginStorePage(BasePage):
         self.state.config_data["store_source"] = source
         self.state.save_config()
 
-        # ★ 切换源时重建类型下拉框
         self._rebuild_type_combo(source)
 
         if source == "curseforge":
@@ -538,6 +532,9 @@ class PluginStorePage(BasePage):
                 if not key:
                     return
 
+        # ★ 每次发起新搜索，重置取消标志
+        self._cancelled = False
+
         query = self._search_entry.text().strip()
         if reset:
             self._current_offset = 0
@@ -546,7 +543,6 @@ class PluginStorePage(BasePage):
         loader = self._loader_combo.currentData()
         game_version = self._version_entry.text().strip() or None
 
-        # 兼容 CurseForge 的类型映射
         if self.store.get_source() == "curseforge":
             if project_type == "plugin":
                 project_type = "mod"
@@ -556,6 +552,9 @@ class PluginStorePage(BasePage):
         index = DEFAULT_INDEX if not query else "relevance"
         self._status_label.setText("搜索中…")
 
+        offset = self._current_offset
+        page_size = self._page_size
+
         def worker():
             try:
                 result = self.store.search(
@@ -564,17 +563,27 @@ class PluginStorePage(BasePage):
                     game_version=game_version,
                     loader=loader,
                     index=index,
-                    offset=self._current_offset,
-                    limit=self._page_size,
+                    offset=offset,
+                    limit=page_size,
                 )
             except Exception as e:
                 result = {"error": str(e)}
-            self.search_done.emit(result)
+
+            # ★ 页面已销毁/已取消 → 不 emit
+            if self._cancelled:
+                return
+            try:
+                self.search_done.emit(result)
+            except (RuntimeError, AttributeError):
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
     @Slot(dict)
     def _on_search_result(self, result):
+        if self._cancelled:
+            return
+
         if "error" in result:
             self._status_label.setText("搜索失败")
             self._show_placeholder(
@@ -718,21 +727,24 @@ class PluginStorePage(BasePage):
 
         def worker():
             data = _load_icon_bytes(icon_url, proxy=proxy)
-            if data:
+            if not data:
+                return
+            if self._cancelled:
+                return
+            try:
                 self.icon_loaded.emit(project_id, data)
+            except (RuntimeError, AttributeError):
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
     @Slot(str, bytes)
     def _on_icon_loaded(self, project_id, data):
+        if self._cancelled:
+            return
         label = self._icon_labels.get(project_id)
         if label is None:
             return
-        try:
-            if not label.isVisible() and label.parent() is None:
-                return
-        except Exception:
-            pass
 
         pixmap = QPixmap()
         if not pixmap.loadFromData(data):
@@ -773,6 +785,8 @@ class PluginStorePage(BasePage):
             QMessageBox.information(self, "提示", "已有安装任务进行中")
             return
 
+        self._cancelled = False  # ★ 新操作，重置取消标志
+
         self._show_versions_view(hit)
 
         loader = self._loader_combo.currentData()
@@ -785,22 +799,32 @@ class PluginStorePage(BasePage):
                     game_version=game_version,
                     loader=loader,
                 )
-                self.files_loaded.emit({
+                payload = {
                     "hit": hit,
                     "files": files,
                     "error": "",
-                })
+                }
             except Exception as e:
-                self.files_loaded.emit({
+                payload = {
                     "hit": hit,
                     "files": [],
                     "error": str(e),
-                })
+                }
+
+            if self._cancelled:
+                return
+            try:
+                self.files_loaded.emit(payload)
+            except (RuntimeError, AttributeError):
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
     @Slot(dict)
     def _on_files_loaded(self, payload):
+        if self._cancelled:
+            return
+
         hit = payload.get("hit")
         files = payload.get("files", [])
         err = payload.get("error", "")
@@ -912,9 +936,7 @@ class PluginStorePage(BasePage):
     #  目录选择
     # ========================================================
     def _get_project_meta(self):
-        """按当前选中类型的 key 查找对应的目标子目录。"""
         key = self._type_combo.currentData() or "mod"
-        # 优先从 PROJECT_TYPES 查找（覆盖全部类型）
         for _label, ptype, target in PROJECT_TYPES:
             if ptype == key:
                 return ptype, target
@@ -977,6 +999,7 @@ class PluginStorePage(BasePage):
 
     def _do_install(self, hit, file, target_dir, with_deps=False):
         self._installing = True
+        self._cancelled = False  # ★ 新任务，重置
         target_dir = Path(target_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -990,15 +1013,20 @@ class PluginStorePage(BasePage):
         self._progress_dlg.setLabelText("准备中…")
         self._progress_dlg.show()
 
+        # 预先取参数（避免 worker 里访问 GUI）
+        loader = self._loader_combo.currentData()
+        game_version = self._version_entry.text().strip() or None
+
         def worker():
             try:
                 if with_deps:
-                    loader = self._loader_combo.currentData()
-                    game_version = (self._version_entry.text().strip()
-                                    or None)
-
                     def step_cb(current, total, title):
-                        self.progress_step.emit(current, total, title)
+                        if self._cancelled:
+                            return
+                        try:
+                            self.progress_step.emit(current, total, title)
+                        except (RuntimeError, AttributeError):
+                            pass
 
                     ok, fail, skip, plan = (
                         self.store.installer.install_with_dependencies(
@@ -1017,8 +1045,13 @@ class PluginStorePage(BasePage):
                     urls = file.fallback_urls or [file.download_url]
 
                     def byte_cb(downloaded, total):
-                        self.progress_bytes.emit(
-                            downloaded, total, file.filename)
+                        if self._cancelled:
+                            return
+                        try:
+                            self.progress_bytes.emit(
+                                downloaded, total, file.filename)
+                        except (RuntimeError, AttributeError):
+                            pass
 
                     self.store.download(urls, dest,
                                         progress_callback=byte_cb)
@@ -1026,11 +1059,21 @@ class PluginStorePage(BasePage):
                         f"文件：{file.filename}\n"
                         f"目标目录：{target_dir}")
 
-                self.install_done.emit(hit.title, summary)
+                if self._cancelled:
+                    return
+                try:
+                    self.install_done.emit(hit.title, summary)
+                except (RuntimeError, AttributeError):
+                    pass
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self.install_failed.emit(str(e))
+                if self._cancelled:
+                    return
+                try:
+                    self.install_failed.emit(str(e))
+                except (RuntimeError, AttributeError):
+                    pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1039,6 +1082,8 @@ class PluginStorePage(BasePage):
     # ========================================================
     @Slot(int, int, str)
     def _on_progress_bytes(self, downloaded, total, filename):
+        if self._cancelled:
+            return
         if not self._progress_dlg:
             return
         try:
@@ -1059,6 +1104,8 @@ class PluginStorePage(BasePage):
 
     @Slot(int, int, str)
     def _on_progress_step(self, current, total, title):
+        if self._cancelled:
+            return
         if not self._progress_dlg:
             return
         try:
@@ -1074,6 +1121,8 @@ class PluginStorePage(BasePage):
     # ========================================================
     @Slot(str, str)
     def _on_install_finished(self, title, summary):
+        if self._cancelled:
+            return
         self._installing = False
 
         if self._progress_dlg:
@@ -1093,6 +1142,8 @@ class PluginStorePage(BasePage):
 
     @Slot(str)
     def _on_install_failed(self, error):
+        if self._cancelled:
+            return
         self._installing = False
 
         if self._progress_dlg:
@@ -1123,7 +1174,6 @@ class PluginStorePage(BasePage):
         if not mrpack_path:
             return
 
-        # 解析并显示信息
         try:
             n_files, info = count_server_files(mrpack_path)
         except MrpackError as e:
@@ -1151,7 +1201,6 @@ class PluginStorePage(BasePage):
         if reply != QMessageBox.Yes:
             return
 
-        # 选择目标目录
         default_dir = str(self.state.server_path)
         target_dir = QFileDialog.getExistingDirectory(
             self,
@@ -1162,7 +1211,6 @@ class PluginStorePage(BasePage):
         if not target_dir:
             return
 
-        # 可选文件询问
         include_optional = False
         opt_count = sum(
             1 for f in info.files if f.server_env == "optional")
@@ -1182,6 +1230,7 @@ class PluginStorePage(BasePage):
     def _do_import_mrpack(self, mrpack_path, target_dir,
                           include_optional=False):
         self._installing = True
+        self._cancelled = False  # ★ 新任务，重置
 
         self.state.log(
             f"开始导入整合包：{mrpack_path.name} → {target_dir}", "info")
@@ -1199,7 +1248,12 @@ class PluginStorePage(BasePage):
             self.state.log(msg, tag)
 
         def progress_cb(current, total, name):
-            self.progress_step.emit(current, total, name)
+            if self._cancelled:
+                return
+            try:
+                self.progress_step.emit(current, total, name)
+            except (RuntimeError, AttributeError):
+                pass
 
         def worker():
             try:
@@ -1218,11 +1272,21 @@ class PluginStorePage(BasePage):
                     if len(errors) > 5:
                         summary += f"  ... 还有 {len(errors) - 5} 个"
 
-                self.install_done.emit(mrpack_path.stem, summary)
+                if self._cancelled:
+                    return
+                try:
+                    self.install_done.emit(mrpack_path.stem, summary)
+                except (RuntimeError, AttributeError):
+                    pass
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self.install_failed.emit(str(e))
+                if self._cancelled:
+                    return
+                try:
+                    self.install_failed.emit(str(e))
+                except (RuntimeError, AttributeError):
+                    pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1230,6 +1294,8 @@ class PluginStorePage(BasePage):
     #  生命周期
     # ========================================================
     def on_show(self):
+        # ★ 进入页面时清除取消标志
+        self._cancelled = False
         self.store.reload()
         if self._loaded_once:
             return

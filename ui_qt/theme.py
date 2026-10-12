@@ -1,4 +1,5 @@
 """主题系统：配色方案 + QSS 样式表。"""
+import threading
 
 THEMES = {
     "深蓝": {
@@ -11,6 +12,9 @@ THEMES = {
         "orange": "#f39c12", "orange_hover": "#d68910",
         "purple": "#9b59b6", "purple_hover": "#8e44ad",
         "text": "#e6e9f0", "text_dim": "#8b93a7", "text_faint": "#5d6577",
+        # ★ 新增
+        "input_bg": "#0d1017", "input_text": "#e6e9f0",
+        "is_light": False,
     },
     "深紫": {
         "bg": "#0e0a1a", "sidebar": "#161028", "card": "#1d1633",
@@ -22,18 +26,25 @@ THEMES = {
         "orange": "#f39c12", "orange_hover": "#d68910",
         "purple": "#c084fc", "purple_hover": "#a855f7",
         "text": "#e9e6f5", "text_dim": "#9a92b0", "text_faint": "#6b6484",
+        "input_bg": "#0a0714", "input_text": "#e9e6f5",
+        "is_light": False,
     },
-    "深青绿": {
-        "bg": "#0a1415", "sidebar": "#0f1c1d", "card": "#142424",
-        "card_hover": "#1c2e2e", "console_bg": "#071011",
-        "border": "#1d3334",
-        "accent": "#0d9488", "accent_hover": "#0f766e",
-        "green": "#22c55e", "green_hover": "#16a34a",
-        "red": "#e74c3c", "red_hover": "#c0392b",
-        "orange": "#f39c12", "orange_hover": "#d68910",
+
+    # ★ 浅绿
+    "淡绿": {
+        "bg": "#f0faf5", "sidebar": "#e5f5ec", "card": "#ffffff",
+        "card_hover": "#f7fdfa", "console_bg": "#0d1a14",
+        "border": "#c8e6d4",
+        "accent": "#10b981", "accent_hover": "#059669",
+        "green": "#16a34a", "green_hover": "#15803d",
+        "red": "#dc2626", "red_hover": "#b91c1c",
+        "orange": "#ea580c", "orange_hover": "#c2410c",
         "purple": "#8b5cf6", "purple_hover": "#7c3aed",
-        "text": "#dcefed", "text_dim": "#86a5a2", "text_faint": "#5d7674",
+        "text": "#1a3a2c", "text_dim": "#5a7a6a", "text_faint": "#93b0a2",
+        "input_bg": "#ffffff", "input_text": "#1a3a2c",
+        "is_light": True,
     },
+
     "午夜黑": {
         "bg": "#000000", "sidebar": "#0a0a0a", "card": "#131313",
         "card_hover": "#1c1c1c", "console_bg": "#050505",
@@ -44,28 +55,53 @@ THEMES = {
         "orange": "#d97706", "orange_hover": "#b45309",
         "purple": "#8b5cf6", "purple_hover": "#7c3aed",
         "text": "#f5f5f5", "text_dim": "#9ca3af", "text_faint": "#6b7280",
+        "input_bg": "#050505", "input_text": "#f5f5f5",
+        "is_light": False,
     },
-    "暗橙": {
-        "bg": "#15100a", "sidebar": "#1e1610", "card": "#261c12",
-        "card_hover": "#33251a", "console_bg": "#0f0b07",
-        "border": "#3a2a1c",
-        "accent": "#ea580c", "accent_hover": "#c2410c",
+
+    # ★ 晨白（与午夜黑对应）
+    "晨白": {
+        "bg": "#ffffff", "sidebar": "#f5f5f7", "card": "#fafafa",
+        "card_hover": "#f0f0f0", "console_bg": "#1a1a1a",
+        "border": "#e4e4e7",
+        "accent": "#4f7cf5", "accent_hover": "#3b66d8",
+        "green": "#16a34a", "green_hover": "#15803d",
+        "red": "#dc2626", "red_hover": "#b91c1c",
+        "orange": "#d97706", "orange_hover": "#b45309",
+        "purple": "#7c3aed", "purple_hover": "#6d28d9",
+        "text": "#18181b", "text_dim": "#71717a", "text_faint": "#a1a1aa",
+        "input_bg": "#ffffff", "input_text": "#18181b",
+        "is_light": True,
+    },
+
+    # ★ 浅橙
+    "浅橙": {
+        "bg": "#fff7f0", "sidebar": "#fdefe4", "card": "#ffffff",
+        "card_hover": "#fffaf5", "console_bg": "#1a1410",
+        "border": "#f5d5b8",
+        "accent": "#f97316", "accent_hover": "#ea580c",
         "green": "#16a34a", "green_hover": "#15803d",
         "red": "#dc2626", "red_hover": "#b91c1c",
         "orange": "#f59e0b", "orange_hover": "#d97706",
         "purple": "#8b5cf6", "purple_hover": "#7c3aed",
-        "text": "#f5ede2", "text_dim": "#b9a896", "text_faint": "#8a7861",
+        "text": "#3a2418", "text_dim": "#7a5e48", "text_faint": "#b8a08c",
+        "input_bg": "#ffffff", "input_text": "#3a2418",
+        "is_light": True,
     },
-    "玫瑰红": {
-        "bg": "#160a0f", "sidebar": "#1f0e16", "card": "#26121c",
-        "card_hover": "#321926", "console_bg": "#10070a",
-        "border": "#3a1c29",
-        "accent": "#e11d48", "accent_hover": "#be123c",
+
+    # ★ 浅粉
+    "浅粉": {
+        "bg": "#fdf0f4", "sidebar": "#f9e4eb", "card": "#ffffff",
+        "card_hover": "#fef5f8", "console_bg": "#1a1116",
+        "border": "#f0d0dc",
+        "accent": "#e91e63", "accent_hover": "#d4145a",
         "green": "#16a34a", "green_hover": "#15803d",
         "red": "#dc2626", "red_hover": "#b91c1c",
         "orange": "#ea580c", "orange_hover": "#c2410c",
         "purple": "#a855f7", "purple_hover": "#9333ea",
-        "text": "#f7e6ea", "text_dim": "#bf95a1", "text_faint": "#8a6570",
+        "text": "#3a1f2a", "text_dim": "#8a6b76", "text_faint": "#c0a4ae",
+        "input_bg": "#ffffff", "input_text": "#3a1f2a",
+        "is_light": True,
     },
 }
 
@@ -76,16 +112,44 @@ class Theme:
     def __init__(self):
         self.current = DEFAULT_THEME
         self.colors = dict(THEMES[DEFAULT_THEME])
+        self._callbacks = []
+        self._lock = threading.RLock()
+
+    def register(self, callback):
+        with self._lock:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
+        return callback
+
+    def unregister(self, callback):
+        with self._lock:
+            try:
+                self._callbacks.remove(callback)
+            except ValueError:
+                pass
 
     def set(self, name):
         if name not in THEMES:
             return False
-        self.current = name
-        self.colors = dict(THEMES[name])
+
+        with self._lock:
+            self.current = name
+            self.colors = dict(THEMES[name])
+            callbacks = list(self._callbacks)
+
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
         return True
 
     def c(self, key):
         return self.colors.get(key, "#ffffff")
+
+    def is_light(self) -> bool:
+        """当前主题是否为浅色主题。"""
+        return bool(self.colors.get("is_light", False))
 
     def qss(self):
         c = self.colors
@@ -104,6 +168,23 @@ class Theme:
         }}
         QMainWindow, QDialog {{
             background-color: {c['bg']};
+        }}
+
+        /* ============================================================
+           侧边栏 Logo
+           ============================================================ */
+        QLabel#LogoTitle {{
+            color: {c['text']};
+            font-size: 18px;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+            background: transparent;
+        }}
+        QLabel#LogoSub {{
+            color: {c['text_faint']};
+            font-size: 11px;
+            letter-spacing: 0.3px;
+            background: transparent;
         }}
 
         /* ============================================================
@@ -244,19 +325,18 @@ class Theme:
         }}
 
         /* ============================================================
-           输入
+           ★ 单行输入框（浅色主题下白底黑字）
            ============================================================ */
-        QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox,
-        QComboBox {{
-            background-color: {c['console_bg']};
-            color: {c['text']};
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+            background-color: {c['input_bg']};
+            color: {c['input_text']};
             border: 1px solid {c['border']};
             border-radius: 6px;
             padding: 6px 10px;
             selection-background-color: {c['accent']};
         }}
-        QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
-        QSpinBox:focus, QComboBox:focus {{
+        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus,
+        QComboBox:focus {{
             border-color: {c['accent']};
         }}
         QComboBox::drop-down {{
@@ -273,6 +353,21 @@ class Theme:
         }}
 
         /* ============================================================
+           ★ 多行文本框（控制台 / 日志，永远深色黑底）
+           ============================================================ */
+        QPlainTextEdit, QTextEdit {{
+            background-color: {c['console_bg']};
+            color: {c['text']};
+            border: 1px solid {c['border']};
+            border-radius: 6px;
+            padding: 6px 10px;
+            selection-background-color: {c['accent']};
+        }}
+        QPlainTextEdit:focus, QTextEdit:focus {{
+            border-color: {c['accent']};
+        }}
+
+        /* ============================================================
            复选框
            ============================================================ */
         QCheckBox {{
@@ -284,7 +379,7 @@ class Theme:
             height: 16px;
             border-radius: 4px;
             border: 1px solid {c['border']};
-            background-color: {c['console_bg']};
+            background-color: {c['input_bg']};
         }}
         QCheckBox::indicator:hover {{
             border-color: {c['accent']};
@@ -436,7 +531,7 @@ class Theme:
         }}
 
         /* ============================================================
-           状态条（页头右上角小徽章）
+           状态条
            ============================================================ */
         QLabel#StatusChip {{
             color: {c['text_dim']};

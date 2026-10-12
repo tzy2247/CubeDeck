@@ -24,7 +24,7 @@ class ServerSetupDialog(QDialog):
         super().__init__(parent)
         self.state = state
         self._installing = False
-        self._cancelled = False        # ★ 关闭/取消后置为 True
+        self._cancelled = False        # 关闭/取消后置为 True
 
         self.setWindowTitle("下载服务端")
         self.resize(680, 600)
@@ -37,7 +37,19 @@ class ServerSetupDialog(QDialog):
         self._load_mc_versions()
 
     # ========================================================
-    #  ★ 生命周期管理
+    #  辅助：读取配置
+    # ========================================================
+    def _get_proxy(self):
+        return self.state.config_data.get(
+            "modrinth_proxy", "").strip() or None
+
+    def _get_prefer(self):
+        """★ 下载源优先级：official / mirror"""
+        return self.state.config_data.get(
+            "download_prefer", "official")
+
+    # ========================================================
+    #  生命周期管理
     # ========================================================
     def closeEvent(self, event):
         """关闭时立标记取消，断开信号，避免 worker 访问已死对象。"""
@@ -192,14 +204,15 @@ class ServerSetupDialog(QDialog):
         if not loader:
             return
 
-        proxy = self.state.config_data.get(
-            "modrinth_proxy", "").strip() or None
+        proxy = self._get_proxy()
+        prefer = self._get_prefer()   # ★
 
         def worker():
             versions = []
             err = ""
             try:
-                versions = list_mc_versions(loader, proxy=proxy)
+                versions = list_mc_versions(
+                    loader, proxy=proxy, prefer=prefer)
             except LoaderDownloadError as e:
                 import traceback
                 traceback.print_exc()
@@ -207,7 +220,6 @@ class ServerSetupDialog(QDialog):
             except Exception as e:
                 err = str(e)
 
-            # ★ 关闭后不再 emit
             if self._cancelled:
                 return
 
@@ -240,15 +252,15 @@ class ServerSetupDialog(QDialog):
         if not loader:
             return
 
-        proxy = self.state.config_data.get(
-            "modrinth_proxy", "").strip() or None
+        proxy = self._get_proxy()
+        prefer = self._get_prefer()   # ★
 
         def worker():
             versions = []
             err = ""
             try:
                 versions = list_loader_versions(
-                    loader, mc_version, proxy=proxy)
+                    loader, mc_version, proxy=proxy, prefer=prefer)
             except LoaderDownloadError as e:
                 import traceback
                 traceback.print_exc()
@@ -401,8 +413,8 @@ class ServerSetupDialog(QDialog):
         self._progress.setRange(0, 0)
         self._status.setText("准备中…")
 
-        proxy = self.state.config_data.get(
-            "modrinth_proxy", "").strip() or None
+        proxy = self._get_proxy()
+        prefer = self._get_prefer()   # ★
         java_path = (self.state.config_data.get("java_path", "").strip()
                      or None)
 
@@ -421,7 +433,8 @@ class ServerSetupDialog(QDialog):
             ok, msg = download_loader(
                 loader, mc_version, build.loader_version,
                 target, java_path=java_path, proxy=proxy,
-                log=log_cb, progress=progress_cb)
+                log=log_cb, progress=progress_cb,
+                prefer=prefer)   # ★
 
             if self._cancelled:
                 return

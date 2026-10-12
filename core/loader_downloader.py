@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 from core.downloader import Downloader
 from core.modrinth import USER_AGENT
+from core.url_order import order_urls
 
 
 # ============================================================
@@ -405,7 +406,7 @@ def _fm_get_download_url(dl, core: str, mc_version: str,
 # ============================================================
 #  列表获取
 # ============================================================
-def list_mc_versions(loader, proxy=None, timeout=30):
+def list_mc_versions(loader, proxy=None, timeout=30, prefer="official"):
     """返回该加载器支持的 MC 版本列表（字符串，新→旧）。"""
     loader = loader.lower()
     dl = Downloader(proxy=proxy, verify_ssl=False, timeout=timeout)
@@ -423,70 +424,70 @@ def list_mc_versions(loader, proxy=None, timeout=30):
     # ---------- Paper：官方 → BMCLAPI → FastMirror ----------
     if loader == "paper":
         last_err = None
-        # FastMirror
+
+        # 官方 / BMCLAPI：按 prefer 排序
+        ordered = order_urls(
+            [f"{PAPER_API}/projects/paper"],
+            [PAPER_API_MIRROR],
+            prefer,
+        )
+
+        for url in ordered:
+            try:
+                data, _ = dl.get_json(url)
+                if "projects" in url:
+                    # 官方 v3 格式
+                    versions_map = data.get("versions", {})
+                    all_versions = []
+                    for _minor, versions in versions_map.items():
+                        all_versions.extend(versions)
+                    seen = set()
+                    result = []
+                    for v in all_versions:
+                        if v not in seen:
+                            seen.add(v)
+                            result.append(v)
+                    if result:
+                        return result
+                else:
+                    # BMCLAPI 格式
+                    versions = data.get("versions", [])
+                    if versions:
+                        return list(versions)
+            except Exception as e:
+                last_err = e
+
+        # FastMirror 兜底
         fm_versions = _fm_get_mc_versions(dl, "paper")
         if fm_versions:
             return fm_versions
 
-        # 官方 v3
-        try:
-            data, _ = dl.get_json(f"{PAPER_API}/projects/paper")
-            versions_map = data.get("versions", {})
-            all_versions = []
-            for _minor, versions in versions_map.items():
-                all_versions.extend(versions)
-
-            seen = set()
-            result = []
-            for v in all_versions:
-                if v not in seen:
-                    seen.add(v)
-                    result.append(v)
-            if result:
-                return result
-        except Exception as e:
-            last_err = e
-
-        # BMCLAPI
-        try:
-            data, _ = dl.get_json(PAPER_API_MIRROR)
-            versions = data.get("versions", [])
-            if versions:
-                return list(versions)
-        except Exception as e:
-            last_err = e
-
         raise LoaderDownloadError(
             f"Paper 版本列表获取失败：{last_err}\n"
-            f"  尝试过：官方 / BMCLAPI / FastMirror")
+            f"  尝试过：{ordered} + FastMirror")
 
     # ---------- Purpur：官方 → BMCLAPI → FastMirror ----------
     if loader == "purpur":
         last_err = None
 
-        try:
-            data, _ = dl.get_json(f"{PURPUR_API}/purpur")
-            versions = data.get("versions", [])
-            if versions:
-                return list(reversed(versions))
-        except Exception as e:
-            last_err = e
+        ordered = order_urls(
+            [f"{PURPUR_API}/purpur"],
+            [PURPUR_API_MIRROR],
+            prefer,
+        )
 
-        try:
-            data, _ = dl.get_json(PURPUR_API_MIRROR)
-            versions = data.get("versions", [])
-            if versions:
-                return list(reversed(versions))
-        except Exception as e:
-            last_err = e
+        for url in ordered:
+            try:
+                data, _ = dl.get_json(url)
+                versions = data.get("versions", [])
+                if versions:
+                    return list(reversed(versions))
+            except Exception as e:
+                last_err = e
 
         fm_versions = _fm_get_mc_versions(dl, "purpur")
         if fm_versions:
             return fm_versions
-
-        raise LoaderDownloadError(
-            f"Purpur 版本列表获取失败：{last_err}\n"
-            f"  尝试过：官方 / BMCLAPI / FastMirror")
 
     # ---------- Fabric ----------
     if loader == "fabric":
@@ -508,10 +509,11 @@ def list_mc_versions(loader, proxy=None, timeout=30):
     # ---------- Forge / NeoForge ----------
     if loader in ("forge", "neoforge"):
         if loader == "forge":
-            urls = [
+            urls = order_urls(
                 f"{FORGE_MAVEN}/net/minecraftforge/forge/maven-metadata.xml",
                 f"{FORGE_MAVEN_MIRROR}/net/minecraftforge/forge/maven-metadata.xml",
-            ]
+                prefer,
+            )
         else:
             urls = [
                 f"{NEOFORGE_MAVEN}/net/neoforged/neoforge/maven-metadata.xml",
@@ -530,8 +532,8 @@ def list_mc_versions(loader, proxy=None, timeout=30):
 
     raise LoaderDownloadError(f"不支持的加载器：{loader}")
 
-
-def list_loader_versions(loader, mc_version, proxy=None, timeout=30):
+def list_loader_versions(loader, mc_version, proxy=None, timeout=30,
+                         prefer="official"):
     """列出指定加载器 + MC 版本下的所有可用的加载器版本。"""
     loader = loader.lower()
     dl = Downloader(proxy=proxy, verify_ssl=False, timeout=timeout)
@@ -562,113 +564,87 @@ def list_loader_versions(loader, mc_version, proxy=None, timeout=30):
                 ))
             return result
 
-        # 官方 v3
-        try:
-            url = (f"{PAPER_API}/projects/paper/versions/"
-                   f"{mc_version}/builds")
-            data, _ = dl.get_json(url)
-            builds = data if isinstance(data, list) else data.get("builds", [])
+        ordered = order_urls(
+            [f"{PAPER_API}/projects/paper/versions/{mc_version}/builds"],
+            [f"{PAPER_API_MIRROR}/{mc_version}"],
+            prefer,
+        )
 
-            result = []
-            for b in builds:
-                build_id = b.get("id") or b.get("build")
-                if build_id is None:
-                    continue
-                channel = b.get("channel", "STABLE").lower()
-                time_str = (b.get("time", "") or "")[:10]
-                result.append(LoaderVersion(
-                    loader="paper",
-                    mc_version=mc_version,
-                    loader_version=str(build_id),
-                    display=f"Paper #{build_id}  {time_str}",
-                    channel=channel,
-                ))
-            if result:
-                return list(reversed(result))
-        except Exception as e:
-            last_err = e
+        for url in ordered:
+            try:
+                data, _ = dl.get_json(url)
+                if "projects" in url:
+                    # 官方 v3
+                    builds = data if isinstance(data, list) \
+                        else data.get("builds", [])
+                    result = []
+                    for b in builds:
+                        build_id = b.get("id") or b.get("build")
+                        if build_id is None:
+                            continue
+                        channel = b.get("channel", "STABLE").lower()
+                        time_str = (b.get("time", "") or "")[:10]
+                        result.append(LoaderVersion(
+                            loader="paper",
+                            mc_version=mc_version,
+                            loader_version=str(build_id),
+                            display=f"Paper #{build_id}  {time_str}",
+                            channel=channel,
+                        ))
+                    if result:
+                        return list(reversed(result))
+                else:
+                    # BMCLAPI
+                    builds = data.get("builds", [])
+                    result = []
+                    for b in builds:
+                        build_id = b.get("build")
+                        if build_id is None:
+                            continue
+                        time_str = (b.get("time", "") or "")[:10]
+                        result.append(LoaderVersion(
+                            loader="paper",
+                            mc_version=mc_version,
+                            loader_version=str(build_id),
+                            display=f"Paper #{build_id}  {time_str}",
+                        ))
+                    if result:
+                        return list(reversed(result))
+            except Exception as e:
+                last_err = e
 
-        # BMCLAPI
-        try:
-            url = f"{PAPER_API_MIRROR}/{mc_version}"
-            data, _ = dl.get_json(url)
-            builds = data.get("builds", [])
-            result = []
-            for b in builds:
-                build_id = b.get("build")
-                if build_id is None:
-                    continue
-                time_str = (b.get("time", "") or "")[:10]
-                result.append(LoaderVersion(
-                    loader="paper",
-                    mc_version=mc_version,
-                    loader_version=str(build_id),
-                    display=f"Paper #{build_id}  {time_str}",
-                ))
-            if result:
-                return list(reversed(result))
-        except Exception as e:
-            last_err = e
-
-        raise LoaderDownloadError(
-            f"Paper 构建列表获取失败：{last_err}\n"
-            f"  尝试过：官方 / BMCLAPI / FastMirror")
+        # FastMirror 兜底
+        fm_builds = _fm_get_builds(dl, "paper", mc_version)
 
     # ---------- Purpur：官方 → BMCLAPI → FastMirror ----------
     if loader == "purpur":
         last_err = None
 
-        # 官方
-        try:
-            data, _ = dl.get_json(f"{PURPUR_API}/purpur/{mc_version}")
-            builds = data.get("builds", {}).get("all", [])
-            if builds:
-                result = []
-                for b in builds:
-                    result.append(LoaderVersion(
-                        loader="purpur",
-                        mc_version=mc_version,
-                        loader_version=str(b),
-                        display=f"Purpur 构建 #{b}",
-                    ))
-                return list(reversed(result))
-        except Exception as e:
-            last_err = e
+        ordered = order_urls(
+            [f"{PURPUR_API}/purpur/{mc_version}"],
+            [f"{PURPUR_API_MIRROR}/{mc_version}"],
+            prefer,
+        )
 
-        # BMCLAPI
-        try:
-            data, _ = dl.get_json(
-                f"{PURPUR_API_MIRROR}/{mc_version}")
-            builds = data.get("builds", {}).get("all", [])
-            if builds:
-                result = []
-                for b in builds:
-                    result.append(LoaderVersion(
-                        loader="purpur",
-                        mc_version=mc_version,
-                        loader_version=str(b),
-                        display=f"Purpur 构建 #{b}",
-                    ))
-                return list(reversed(result))
-        except Exception as e:
-            last_err = e
+        for url in ordered:
+            try:
+                data, _ = dl.get_json(url)
+                builds = data.get("builds", {}).get("all", [])
+                if builds:
+                    result = []
+                    for b in builds:
+                        result.append(LoaderVersion(
+                            loader="purpur",
+                            mc_version=mc_version,
+                            loader_version=str(b),
+                            display=f"Purpur 构建 #{b}",
+                        ))
+                    return list(reversed(result))
+            except Exception as e:
+                last_err = e
 
-        # FastMirror
+        # FastMirror 兜底
         fm_builds = _fm_get_builds(dl, "purpur", mc_version)
-        if fm_builds:
-            result = []
-            for version, display in fm_builds:
-                result.append(LoaderVersion(
-                    loader="purpur",
-                    mc_version=mc_version,
-                    loader_version=version,
-                    display=display,
-                ))
-            return result
-
-        raise LoaderDownloadError(
-            f"Purpur 构建列表获取失败：{last_err}\n"
-            f"  尝试过：官方 / BMCLAPI / FastMirror")
 
     # ---------- Fabric ----------
     if loader == "fabric":
@@ -715,10 +691,11 @@ def list_loader_versions(loader, mc_version, proxy=None, timeout=30):
     # ---------- Forge / NeoForge ----------
     if loader in ("forge", "neoforge"):
         if loader == "forge":
-            urls = [
+            urls = order_urls(
                 f"{FORGE_MAVEN}/net/minecraftforge/forge/maven-metadata.xml",
                 f"{FORGE_MAVEN_MIRROR}/net/minecraftforge/forge/maven-metadata.xml",
-            ]
+                prefer,
+            )
         else:
             urls = [
                 f"{NEOFORGE_MAVEN}/net/neoforged/neoforge/maven-metadata.xml",
@@ -746,7 +723,8 @@ def list_loader_versions(loader, mc_version, proxy=None, timeout=30):
 #  下载 / 安装
 # ============================================================
 def download_loader(loader, mc_version, loader_version, server_dir,
-                    java_path=None, proxy=None, log=None, progress=None):
+                    java_path=None, proxy=None, log=None, progress=None,
+                    prefer="official"):
     if log is None:
         log = lambda m, t="info": None
     if progress is None:
@@ -761,15 +739,15 @@ def download_loader(loader, mc_version, loader_version, server_dir,
     try:
         if loader == "vanilla":
             return _install_vanilla(
-                dl, mc_version, server_dir, log, progress)
+                dl, mc_version, server_dir, log, progress, prefer)
         if loader == "paper":
             return _install_paper(
                 dl, mc_version, loader_version, server_dir,
-                proxy, log, progress)
+                proxy, log, progress, prefer)
         elif loader == "purpur":
             return _install_purpur(
                 dl, mc_version, loader_version, server_dir,
-                proxy, log, progress)
+                proxy, log, progress, prefer)
         elif loader == "fabric":
             return _install_fabric(
                 dl, mc_version, loader_version, server_dir, log, progress)
@@ -779,7 +757,7 @@ def download_loader(loader, mc_version, loader_version, server_dir,
         elif loader in ("forge", "neoforge"):
             return _install_forge_like(
                 dl, loader, mc_version, loader_version,
-                server_dir, java_path, log, progress)
+                server_dir, java_path, log, progress, prefer)
         else:
             return False, f"不支持的加载器：{loader}"
     except Exception as e:
@@ -791,8 +769,8 @@ def download_loader(loader, mc_version, loader_version, server_dir,
 # ============================================================
 #  原版安装
 # ============================================================
-def _install_vanilla(dl, mc_version, server_dir, log, progress):
-    """从 Mojang 官方下载原版服务端。"""
+def _install_vanilla(dl, mc_version, server_dir, log, progress,
+                     prefer="official"):
     log(f"获取原版服务端 {mc_version} 信息…", "info")
 
     try:
@@ -814,7 +792,11 @@ def _install_vanilla(dl, mc_version, server_dir, log, progress):
     if not version_url:
         return False, f"版本 {mc_version} 缺少元数据地址"
 
-    version_urls = [version_url, _bmclapi_mirror(version_url)]
+    version_urls = order_urls(
+        version_url,
+        _bmclapi_mirror(version_url),
+        prefer,
+    )
     seen = set()
     version_urls = [u for u in version_urls
                     if not (u in seen or seen.add(u))]
@@ -835,6 +817,11 @@ def _install_vanilla(dl, mc_version, server_dir, log, progress):
     if not server_url:
         return False, f"版本 {mc_version} 服务端下载地址为空"
 
+    server_urls = order_urls(
+        server_url,
+        _bmclapi_mirror(server_url),
+        prefer,
+    )
     server_urls = [server_url, _bmclapi_mirror(server_url)]
     seen = set()
     server_urls = [u for u in server_urls
@@ -861,23 +848,23 @@ def _install_vanilla(dl, mc_version, server_dir, log, progress):
 #  Paper：官方 → BMCLAPI → FastMirror
 # ============================================================
 def _install_paper(dl, mc_version, build_id, server_dir,
-                   proxy, log, progress):
+                   proxy, log, progress, prefer="official"):
     log(f"获取 Paper 构建 #{build_id} 信息…", "info")
 
     filename = f"paper-{mc_version}-{build_id}.jar"
 
-    urls = [
-        (f"{PAPER_API}/projects/paper/versions/{mc_version}"
-         f"/builds/{build_id}/downloads/{filename}"),
-        f"{PAPER_API_MIRROR}/{mc_version}/{build_id}/download",
-    ]
+    urls = order_urls(
+        [(f"{PAPER_API}/projects/paper/versions/{mc_version}"
+          f"/builds/{build_id}/downloads/{filename}")],
+        [f"{PAPER_API_MIRROR}/{mc_version}/{build_id}/download"],
+        prefer,
+    )
 
-    # FastMirror 备用：拼回 build 前缀
     fm_url = _fm_get_download_url(
         dl, "paper", mc_version, f"build{build_id}")
     if fm_url:
         urls.append(fm_url)
-        log(f"  已加入 FastMirror 备用源", "info")
+        log(f"  已加入 FastMirror 兜底源", "info")
 
     target = server_dir / "server.jar"
     log(f"下载 {filename} → server.jar", "info")
@@ -897,19 +884,19 @@ def _install_paper(dl, mc_version, build_id, server_dir,
 #  Purpur：官方 → BMCLAPI → FastMirror
 # ============================================================
 def _install_purpur(dl, mc_version, build_id, server_dir,
-                    proxy, log, progress):
+                    proxy, log, progress, prefer="official"):
     filename = f"purpur-{mc_version}-{build_id}.jar"
-    urls = [
-        f"{PURPUR_API}/purpur/{mc_version}/{build_id}/download",
-        f"{PURPUR_API_MIRROR}/{mc_version}/{build_id}/download",
-    ]
+    urls = order_urls(
+        [f"{PURPUR_API}/purpur/{mc_version}/{build_id}/download"],
+        [f"{PURPUR_API_MIRROR}/{mc_version}/{build_id}/download"],
+        prefer,
+    )
 
-    # FastMirror 备用
     fm_url = _fm_get_download_url(
         dl, "purpur", mc_version, f"build{build_id}")
     if fm_url:
         urls.append(fm_url)
-        log(f"  已加入 FastMirror 备用源", "info")
+        log(f"  已加入 FastMirror 兜底源", "info")
 
     target = server_dir / "server.jar"
     log(f"下载 Purpur {mc_version} 构建 #{build_id}", "info")
@@ -982,16 +969,18 @@ def _install_quilt(dl, mc_version, loader_version, server_dir, log, progress):
 #  Forge / NeoForge
 # ============================================================
 def _install_forge_like(dl, loader, mc_version, loader_version,
-                        server_dir, java_path, log, progress):
+                        server_dir, java_path, log, progress,
+                        prefer="official"):
     if loader == "forge":
-        urls = [
-            (f"{FORGE_MAVEN}/net/minecraftforge/forge/"
-             f"{loader_version}/"
-             f"forge-{loader_version}-installer.jar"),
-            (f"{FORGE_MAVEN_MIRROR}/net/minecraftforge/forge/"
-             f"{loader_version}/"
-             f"forge-{loader_version}-installer.jar"),
-        ]
+        urls = order_urls(
+            [(f"{FORGE_MAVEN}/net/minecraftforge/forge/"
+              f"{loader_version}/"
+              f"forge-{loader_version}-installer.jar")],
+            [(f"{FORGE_MAVEN_MIRROR}/net/minecraftforge/forge/"
+              f"{loader_version}/"
+              f"forge-{loader_version}-installer.jar")],
+            prefer,
+        )
         label = "Forge"
     else:
         urls = [
